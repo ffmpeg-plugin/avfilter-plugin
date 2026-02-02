@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 option(BUILD_PLUGINS "Build example plugins" ON)
+set(FFMPEG_CMD "ffmpeg" CACHE STRING "path to ffmpeg cmd")
 
 # Header-only interface library
 add_library(quink_oc_plugin INTERFACE)
@@ -18,6 +19,7 @@ target_include_directories(quink_oc_plugin INTERFACE
 install(FILES include/quink_oc_plugin.h DESTINATION include)
 
 if(BUILD_PLUGINS)
+    enable_testing()
     find_package(OpenCV REQUIRED COMPONENTS core imgproc)
     add_subdirectory(src)
 endif()
