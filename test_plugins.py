@@ -279,7 +279,7 @@ Examples:
                     print(f"  Warning: Failed to copy {dep_file}: {e}")
 
         # Copy plugin files
-        for plugin_name in ["blur_plugin", "avgframes_plugin", "split_plugin", "blend_plugin"]:
+        for plugin_name in ["blur_plugin", "avgframes_plugin", "split_plugin", "blend_plugin", "detect_plugin"]:
             plugin_file = f"lib{plugin_name}{plugin_ext}"
             src_path = os.path.join(plugin_dir, plugin_file)
             dst_path = os.path.join(ffmpeg_dir, plugin_file)
@@ -394,6 +394,153 @@ Examples:
             passed += 1
         else:
             print("[FAIL] Blend plugin test failed")
+            failed += 1
+    else:
+        skipped += 1
+
+    # Test 5: Detect Plugin (immediate mode)
+    print()
+    print("-" * 40)
+    print("Test 5: Detect Plugin (immediate mode)")
+    print("-" * 40)
+    if check_plugin(plugin_dir, "detect_plugin", plugin_ext):
+        # Use color test source with colored regions for detection
+        success = run_ffmpeg(ffmpeg_bin, [
+            "-y", "-f", "lavfi",
+            "-i", f"smptebars=duration={DURATION}:size={WIDTH}x{HEIGHT}:rate={FPS}",
+            "-vf", f"oc_plugin=plugin={get_plugin('detect_plugin')}",
+            f"{output_dir}/test_detect_immediate.mp4"
+        ])
+        if success:
+            print(f"[PASS] Detect plugin (immediate) test completed: {output_dir}/test_detect_immediate.mp4")
+            passed += 1
+        else:
+            print("[FAIL] Detect plugin (immediate) test failed")
+            failed += 1
+    else:
+        skipped += 1
+
+    # Test 6: Detect Plugin (delayed mode with buffering)
+    print()
+    print("-" * 40)
+    print("Test 6: Detect Plugin (delayed mode, delay=2)")
+    print("-" * 40)
+    if check_plugin(plugin_dir, "detect_plugin", plugin_ext):
+        success = run_ffmpeg(ffmpeg_bin, [
+            "-y", "-f", "lavfi",
+            "-i", f"smptebars=duration={DURATION}:size={WIDTH}x{HEIGHT}:rate={FPS}",
+            "-vf", f"oc_plugin=plugin={get_plugin('detect_plugin')}:params=delay=2",
+            f"{output_dir}/test_detect_delayed.mp4"
+        ])
+        if success:
+            print(f"[PASS] Detect plugin (delayed) test completed: {output_dir}/test_detect_delayed.mp4")
+            passed += 1
+        else:
+            print("[FAIL] Detect plugin (delayed) test failed")
+            failed += 1
+    else:
+        skipped += 1
+
+    # Test 7: Detect Plugin - Show detection results (no encoding)
+    print()
+    print("-" * 40)
+    print("Test 7: Detect Plugin - Show Detection Results")
+    print("-" * 40)
+    if check_plugin(plugin_dir, "detect_plugin", plugin_ext):
+        print("Running detection on SMPTE color bars (showinfo filter)...")
+        print()
+        # Use showinfo filter to display detection bbox side data
+        cmd = [
+            ffmpeg_bin, "-hide_banner",
+            "-f", "lavfi",
+            "-i", f"smptebars=duration=0.2:size={WIDTH}x{HEIGHT}:rate=5",
+            "-vf", f"oc_plugin=plugin={get_plugin('detect_plugin')},showinfo",
+            "-f", "null", "-"
+        ]
+        print(f"Command: {' '.join(cmd)}")
+        print()
+        try:
+            env = os.environ.copy()
+            env["AV_LOG_FORCE_NOCOLOR"] = "1"
+            result = subprocess.run(cmd, capture_output=True, text=True, env=env)
+            output = result.stderr + result.stdout
+            
+            # Parse detection results from showinfo output
+            bbox_found = False
+            detection_lines = []
+            frame_info = None
+            
+            for line in output.split('\n'):
+                # Capture frame info line
+                if 'n:' in line and 'pts:' in line and 'fmt:' in line:
+                    frame_info = line.strip()
+                # Capture side data header
+                elif 'side data - Bounding boxes' in line:
+                    bbox_found = True
+                    detection_lines.append(line.strip())
+                # Capture individual detection boxes
+                elif 'index:' in line and 'region:' in line and 'label:' in line:
+                    detection_lines.append(line.strip())
+            
+            if bbox_found and detection_lines:
+                print("=" * 50)
+                print("DETECTION RESULTS")
+                print("=" * 50)
+                if frame_info:
+                    # Extract key info from frame_info
+                    print(f"Frame: {frame_info.split(']')[-1].strip()[:80]}...")
+                print()
+                print("Detected objects:")
+                print("-" * 50)
+                for line in detection_lines:
+                    if 'index:' in line:
+                        # Parse: index: 0, region: (460, 0) -> (552, 320), label: red, confidence: 1000000/1000000.
+                        # Extract and format nicely
+                        parts = line.split(',')
+                        idx = parts[0].split(':')[-1].strip() if len(parts) > 0 else '?'
+                        
+                        # Extract region coordinates
+                        region_match = re.search(r'region:\s*\((\d+),\s*(\d+)\)\s*->\s*\((\d+),\s*(\d+)\)', line)
+                        if region_match:
+                            x1, y1, x2, y2 = region_match.groups()
+                            w = int(x2) - int(x1)
+                            h = int(y2) - int(y1)
+                            region_str = f"({x1},{y1}) {w}x{h}"
+                        else:
+                            region_str = "?"
+                        
+                        # Extract label
+                        label_match = re.search(r'label:\s*(\w+)', line)
+                        label = label_match.group(1) if label_match else '?'
+                        
+                        # Extract confidence
+                        conf_match = re.search(r'confidence:\s*(\d+)/(\d+)', line)
+                        if conf_match:
+                            conf = int(conf_match.group(1)) / int(conf_match.group(2))
+                            conf_str = f"{conf*100:.1f}%"
+                        else:
+                            conf_str = "?"
+                        
+                        print(f"  [{idx}] {label:8s} @ {region_str:20s} conf: {conf_str}")
+                    else:
+                        print(f"  {line}")
+                print("-" * 50)
+                print()
+                print("[PASS] Detection plugin produces detailed bbox results")
+                passed += 1
+            else:
+                # Check if plugin at least ran successfully
+                if result.returncode == 0:
+                    print("Plugin ran but no detection boxes found in this frame.")
+                    print("[PASS] Detection plugin executed successfully")
+                    passed += 1
+                else:
+                    print("[FAIL] Detection plugin test failed")
+                    print(f"Return code: {result.returncode}")
+                    failed += 1
+        except Exception as e:
+            print(f"Error: {e}")
+            print("[FAIL] Detection plugin test failed")
             failed += 1
     else:
         skipped += 1

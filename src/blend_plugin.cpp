@@ -3,7 +3,7 @@
 #include <cstdlib>
 #include <cstring>
 
-class AlphaBlendPlugin : public QuinkOCPlugin {
+class AlphaBlendPlugin : public QuinkOCProcessPlugin {
 public:
     AlphaBlendPlugin() {}
 
@@ -61,4 +61,4 @@ private:
     double alpha_ = 0.5;
 };
 
-QUINK_OC_PLUGIN_ENTRY(AlphaBlendPlugin, "blend", "Alpha blend two video streams")
+QUINK_OC_PROCESS_PLUGIN_ENTRY(AlphaBlendPlugin, "blend", "Alpha blend two video streams")

@@ -3,7 +3,7 @@
 #include <cstdlib>
 #include <cstring>
 
-class SplitPlugin : public QuinkOCPlugin {
+class SplitPlugin : public QuinkOCProcessPlugin {
 public:
     bool init(const char *params, int nb_inputs, int nb_outputs) override {
         (void)params;
@@ -61,4 +61,4 @@ private:
     int num_outputs_ = 0;
 };
 
-QUINK_OC_PLUGIN_ENTRY(SplitPlugin, "split", "Single input to multiple outputs")
+QUINK_OC_PROCESS_PLUGIN_ENTRY(SplitPlugin, "split", "Single input to multiple outputs")

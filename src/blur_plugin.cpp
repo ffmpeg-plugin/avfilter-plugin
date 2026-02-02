@@ -3,7 +3,7 @@
 #include <cstdlib>
 #include <cstring>
 
-class GaussianBlurPlugin : public QuinkOCPlugin {
+class GaussianBlurPlugin : public QuinkOCProcessPlugin {
 public:
     bool init(const char *params, int nb_inputs, int nb_outputs) override {
         if (nb_inputs != 1 || nb_outputs != 1)
@@ -49,4 +49,4 @@ private:
     int kernel_size_ = 5;
 };
 
-QUINK_OC_PLUGIN_ENTRY(GaussianBlurPlugin, "blur", "Gaussian blur effect")
+QUINK_OC_PROCESS_PLUGIN_ENTRY(GaussianBlurPlugin, "blur", "Gaussian blur effect")

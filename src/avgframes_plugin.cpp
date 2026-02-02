@@ -4,7 +4,7 @@
 #include <cstring>
 #include <deque>
 
-class FrameAveragePlugin : public QuinkOCPlugin {
+class FrameAveragePlugin : public QuinkOCProcessPlugin {
 public:
     FrameAveragePlugin() {}
 
@@ -82,4 +82,4 @@ private:
     int output_count_ = 0;
 };
 
-QUINK_OC_PLUGIN_ENTRY(FrameAveragePlugin, "avgframes", "Temporal frame averaging")
+QUINK_OC_PROCESS_PLUGIN_ENTRY(FrameAveragePlugin, "avgframes", "Temporal frame averaging")

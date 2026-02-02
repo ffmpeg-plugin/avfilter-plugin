@@ -25,11 +25,31 @@
 
 #include <opencv2/core.hpp>
 #include <vector>
+#include <string>
 
 #define QUINK_OC_PLUGIN_API_VERSION 1
 
 /**
- * Supported I/O modes:
+ * Plugin capability flags.
+ *
+ * Plugins declare their capabilities in QuinkOCPluginDescriptor::capabilities.
+ * FFmpeg uses these flags to determine the plugin type and call the appropriate methods.
+ *
+ * IMPORTANT: QUINK_OC_CAP_PROCESS and QUINK_OC_CAP_DETECT are MUTUALLY EXCLUSIVE.
+ * A plugin must declare exactly one of these capabilities, not both.
+ *
+ * Plugin types:
+ *   - PROCESS plugin: Inherits QuinkOCProcessPlugin, transforms frames
+ *   - DETECT plugin:  Inherits QuinkOCDetectPlugin, analyzes frames for detection
+ */
+enum QuinkOCCapability {
+    QUINK_OC_CAP_NONE      = 0,        ///< No special capabilities (invalid)
+    QUINK_OC_CAP_PROCESS   = 1 << 0,   ///< Process plugin: transforms frames
+    QUINK_OC_CAP_DETECT    = 1 << 1,   ///< Detect plugin: analyzes frames for detection
+};
+
+/**
+ * Supported I/O modes (when QUINK_OC_CAP_PROCESS is set):
  *   - Single-input, single-output (1:1)
  *   - Multi-input, single-output (N:1) - e.g., video compositing, blending
  *   - Single-input, multi-output (1:N) - e.g., video splitting, analysis
@@ -50,9 +70,66 @@ enum QuinkOCProcessResult {
     QUINK_OC_ERROR = -1           ///< Processing error
 };
 
-class QuinkOCPlugin {
+/**
+ * Detection results structure following OpenCV DNN conventions.
+ *
+ * This mirrors the output format of cv::dnn::DetectionModel::detect():
+ *   - boxes: bounding boxes as cv::Rect
+ *   - class_ids: integer class IDs
+ *   - confidences: detection confidence scores
+ *
+ * Additionally provides:
+ *   - labels: human-readable labels (optional, can be empty strings)
+ *
+ * All vectors must have the same size. Empty vectors indicate no detections.
+ */
+struct QuinkOCDetections {
+    std::vector<cv::Rect> boxes;        ///< Bounding boxes (x, y, width, height)
+    std::vector<int> class_ids;         ///< Class IDs (e.g., COCO class indices)
+    std::vector<float> confidences;     ///< Confidence scores in range [0.0, 1.0]
+    std::vector<std::string> labels;    ///< Human-readable labels (optional)
+
+    void clear() {
+        boxes.clear();
+        class_ids.clear();
+        confidences.clear();
+        labels.clear();
+    }
+
+    size_t size() const {
+        return boxes.size();
+    }
+
+    bool empty() const {
+        return boxes.empty();
+    }
+
+    /**
+     * Add a detection result.
+     * @param box        Bounding box
+     * @param class_id   Class ID
+     * @param confidence Confidence score
+     * @param label      Optional label (default empty)
+     */
+    void add(const cv::Rect& box, int class_id, float confidence,
+             const std::string& label = "") {
+        boxes.push_back(box);
+        class_ids.push_back(class_id);
+        confidences.push_back(confidence);
+        labels.push_back(label);
+    }
+};
+
+/*===========================================================================
+ * Plugin Base Class
+ *
+ * All plugins (PROCESS or DETECT) inherit from this base class.
+ * Provides common lifecycle methods: init() and uninit().
+ *===========================================================================*/
+
+class QuinkOCPluginBase {
 public:
-    virtual ~QuinkOCPlugin() = default;
+    virtual ~QuinkOCPluginBase() = default;
 
     /**
      * Initialize the plugin
@@ -63,6 +140,33 @@ public:
      */
     virtual bool init(const char *params, int nb_inputs, int nb_outputs) = 0;
 
+    /**
+     * Cleanup resources
+     */
+    virtual void uninit() = 0;
+};
+
+/*===========================================================================
+ * Process Plugin Class
+ *
+ * For plugins that transform video frames.
+ * Inherit from this class and implement process(), flush(), configure().
+ *
+ * Supported I/O modes:
+ *   - 1:1 (single-input, single-output)
+ *   - N:1 (multi-input, single-output) - compositing, blending
+ *   - 1:N (single-input, multi-output) - splitting
+ *
+ * Data flow:
+ *   inputs --> process() --> QUINK_OC_OK:        outputs ready
+ *                        --> QUINK_OC_TRY_AGAIN: buffered, no output yet
+ *                        --> QUINK_OC_ERROR:     error
+ *
+ *   EOF --> flush() --> output buffered frames
+ *===========================================================================*/
+
+class QuinkOCProcessPlugin : public QuinkOCPluginBase {
+public:
     /**
      * Process frames
      *
@@ -78,6 +182,9 @@ public:
      *
      * @param inputs   Input cv::Mat images (zero-copy from FFmpeg, refcount tied to AVFrame)
      * @param outputs  Output cv::Mat images (pre-allocated buffer to write into)
+     * @return QUINK_OC_OK:        success, output ready
+     *         QUINK_OC_TRY_AGAIN: success, buffered, no output yet
+     *         QUINK_OC_ERROR:     processing error
      */
     virtual QuinkOCProcessResult process(const std::vector<cv::Mat> &inputs,
                                          std::vector<cv::Mat> &outputs) = 0;
@@ -107,7 +214,64 @@ public:
      */
     virtual bool configure(const std::vector<QuinkOCFrameConfig> &inputs,
                            std::vector<QuinkOCFrameConfig> &outputs) = 0;
-    virtual void uninit() = 0;
+};
+
+/*===========================================================================
+ * Detect Plugin Class
+ *
+ * For plugins that analyze frames and produce detection results.
+ * Inherit from this class and implement detect() and optionally flushDetect().
+ *
+ * DETECT plugins are always 1:1 (single-input, single-output).
+ * The input frame passes through to output with detection results attached
+ * as AV_FRAME_DATA_DETECTION_BBOXES side data.
+ *
+ * Data flow:
+ *   input frame --> detect() --> QUINK_OC_OK:        output frame + detections
+ *                            --> QUINK_OC_TRY_AGAIN: buffered, no output yet
+ *                            --> QUINK_OC_ERROR:     error
+ *
+ *   EOF --> flushDetect() --> output buffered frames + detections
+ *
+ * This design supports:
+ *   - Immediate detection: return QUINK_OC_OK for each frame
+ *   - Multi-frame analysis: return QUINK_OC_TRY_AGAIN to buffer frames,
+ *     then return QUINK_OC_OK when ready (e.g., tracking, action recognition)
+ *===========================================================================*/
+
+class QuinkOCDetectPlugin : public QuinkOCPluginBase {
+public:
+    /**
+     * Perform object detection on input frame
+     *
+     * The plugin must retain a reference to the input Mat if buffering is needed.
+     * When returning QUINK_OC_OK, the plugin should set `output` to the frame
+     * to be output (typically the input or a buffered frame).
+     *
+     * @param input       Input cv::Mat image (zero-copy from FFmpeg, read-only)
+     * @param output      Output cv::Mat (set to input for pass-through, or buffered frame)
+     * @param detections  Output detection results for the output frame
+     * @return QUINK_OC_OK:        success, output frame ready
+     *         QUINK_OC_TRY_AGAIN: success, frame buffered, no output yet
+     *         QUINK_OC_ERROR:     processing error
+     */
+    virtual QuinkOCProcessResult detect(const cv::Mat &input, cv::Mat &output,
+                                        QuinkOCDetections &detections) = 0;
+
+    /**
+     * Flush buffered frames at end of stream
+     *
+     * Called when input stream ends. The plugin should output any remaining
+     * buffered frames with their detection results. This method may be called
+     * multiple times until it returns false.
+     *
+     * Default implementation returns false (no buffering).
+     *
+     * @param output      Output cv::Mat (the buffered frame to output)
+     * @param detections  Detection results for the output frame
+     * @return true if a frame was output, false if no more frames
+     */
+    virtual bool flushDetect(cv::Mat &output, QuinkOCDetections &detections) = 0;
 };
 
 /**
@@ -120,9 +284,10 @@ struct QuinkOCPluginDescriptor {
     int api_version;            ///< Must be QUINK_OC_PLUGIN_API_VERSION
     const char *name;           ///< Plugin name
     const char *description;    ///< Plugin description
+    unsigned int capabilities;  ///< Bitmask of QuinkOCCapability flags
 
-    QuinkOCPlugin* (*create)();            ///< Create plugin instance
-    void (*destroy)(QuinkOCPlugin* p);     ///< Destroy plugin instance
+    QuinkOCPluginBase* (*create)();            ///< Create plugin instance
+    void (*destroy)(QuinkOCPluginBase* p);     ///< Destroy plugin instance
 };
 
 typedef const QuinkOCPluginDescriptor* (*QuinkOCPluginGetDescriptorFunc)();
@@ -137,18 +302,47 @@ typedef const QuinkOCPluginDescriptor* (*QuinkOCPluginGetDescriptorFunc)();
 #endif
 
 /**
- * Plugin entry macro
+ * Plugin entry macro for PROCESS plugins
  *
- * Usage: QUINK_OC_PLUGIN_ENTRY(PluginClass, "name", "description")
+ * Usage: QUINK_OC_PROCESS_PLUGIN_ENTRY(PluginClass, "name", "description")
+ *
+ * Example:
+ *   class BlurPlugin : public QuinkOCProcessPlugin { ... };
+ *   QUINK_OC_PROCESS_PLUGIN_ENTRY(BlurPlugin, "blur", "Gaussian blur filter")
  */
-#define QUINK_OC_PLUGIN_ENTRY(PluginClass, plugin_name, plugin_desc) \
-    static QuinkOCPlugin* _quink_create() { return new PluginClass(); } \
-    static void _quink_destroy(QuinkOCPlugin* p) { delete p; } \
+#define QUINK_OC_PROCESS_PLUGIN_ENTRY(PluginClass, plugin_name, plugin_desc) \
+    static QuinkOCPluginBase* _quink_create() { return new PluginClass(); } \
+    static void _quink_destroy(QuinkOCPluginBase* p) { delete p; } \
     extern "C" QUINK_OC_EXPORT const QuinkOCPluginDescriptor* quink_oc_plugin_get_descriptor() { \
         static const QuinkOCPluginDescriptor desc = { \
             QUINK_OC_PLUGIN_API_VERSION, \
             plugin_name, \
             plugin_desc, \
+            QUINK_OC_CAP_PROCESS, \
+            _quink_create, \
+            _quink_destroy \
+        }; \
+        return &desc; \
+    }
+
+/**
+ * Plugin entry macro for DETECT plugins
+ *
+ * Usage: QUINK_OC_DETECT_PLUGIN_ENTRY(PluginClass, "name", "description")
+ *
+ * Example:
+ *   class YoloPlugin : public QuinkOCDetectPlugin { ... };
+ *   QUINK_OC_DETECT_PLUGIN_ENTRY(YoloPlugin, "yolo", "YOLO object detector")
+ */
+#define QUINK_OC_DETECT_PLUGIN_ENTRY(PluginClass, plugin_name, plugin_desc) \
+    static QuinkOCPluginBase* _quink_create() { return new PluginClass(); } \
+    static void _quink_destroy(QuinkOCPluginBase* p) { delete p; } \
+    extern "C" QUINK_OC_EXPORT const QuinkOCPluginDescriptor* quink_oc_plugin_get_descriptor() { \
+        static const QuinkOCPluginDescriptor desc = { \
+            QUINK_OC_PLUGIN_API_VERSION, \
+            plugin_name, \
+            plugin_desc, \
+            QUINK_OC_CAP_DETECT, \
             _quink_create, \
             _quink_destroy \
         }; \
