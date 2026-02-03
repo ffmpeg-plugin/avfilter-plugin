@@ -35,3 +35,31 @@ ffmpeg -i input.mp4 \
 ```
 
 Note: Use `.so` on Linux, `.dylib` on macOS, `.dll` on Windows.
+
+## Windows Platform Notes
+
+⚠️ **Important**: On Windows, FFmpeg cannot load plugin DLLs from absolute paths due to Windows DLL loading restrictions. You must place `ffmpeg.exe` and the plugin DLL in the **same directory**.
+
+### Recommended Setup
+
+1. Copy `ffmpeg.exe` to your plugin build directory, or
+2. Copy the plugin `.dll` files to the directory where `ffmpeg.exe` is located
+
+```powershell
+# Example: Copy ffmpeg to plugin directory
+copy C:\path\to\ffmpeg.exe C:\path\to\plugins\
+
+# Then run from the plugin directory
+cd C:\path\to\plugins
+ffmpeg -i input.mp4 -vf "oc_plugin=plugin=libblur_plugin.dll:params='ksize=5'" output.mp4
+```
+
+### Why This Matters
+
+Windows restricts DLL loading paths for security reasons. When FFmpeg tries to load a plugin DLL:
+- ❌ `plugin=C:\full\path\to\libblur_plugin.dll` — **Will fail**
+- ✅ `plugin=libblur_plugin.dll` (in same directory as ffmpeg.exe) — **Works**
+
+### CTest Integration
+
+The CMake test configuration automatically handles this by copying `ffmpeg.exe` to the plugin build directory during the build process (via `POST_BUILD` event).

@@ -15,41 +15,115 @@ add_plugin(avgframes)
 add_plugin(split)
 add_plugin(detect)
 
-function(add_ffmpeg_test TEST_NAME INPUT_COMMAND OUTPUT_FILE)
+# ============================================================================
+# Test Configuration
+# ============================================================================
+
+# Check if FFMPEG_CMD is set and exists
+if(NOT FFMPEG_CMD)
+    message(STATUS "FFMPEG_CMD not set, skipping plugin tests")
+    return()
+endif()
+
+if(NOT EXISTS "${FFMPEG_CMD}")
+    message(WARNING "FFMPEG_CMD '${FFMPEG_CMD}' does not exist, skipping plugin tests")
+    return()
+endif()
+
+message(STATUS "Using FFmpeg: ${FFMPEG_CMD}")
+
+# Common test video source
+set(TEST_INPUT_LAVFI "testsrc=duration=3:size=640x480:rate=30")
+
+# Plugin directory (where DLLs are built)
+set(PLUGIN_DIR "$<TARGET_FILE_DIR:blur_plugin>")
+
+# On Windows, copy ffmpeg to the plugin directory so it can load DLLs from same directory
+# Windows DLL loading is restricted and won't load from arbitrary paths
+if(WIN32)
+    get_filename_component(FFMPEG_FILENAME "${FFMPEG_CMD}" NAME)
+    set(FFMPEG_LOCAL "$<TARGET_FILE_DIR:blur_plugin>/${FFMPEG_FILENAME}")
+    
+    # Create a custom target to copy ffmpeg before tests
+    add_custom_target(copy_ffmpeg_for_tests ALL
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${FFMPEG_CMD}" "${PLUGIN_DIR}/"
+        COMMENT "Copying FFmpeg to plugin directory for testing"
+    )
+    
+    # Make sure plugins are built before copying ffmpeg (to ensure PLUGIN_DIR exists)
+    add_dependencies(copy_ffmpeg_for_tests blur_plugin)
+    
+    # Use the local copy of ffmpeg for tests
+    set(TEST_FFMPEG_CMD "${FFMPEG_LOCAL}")
+    # On Windows, load plugin from current directory (same as ffmpeg)
+    set(PLUGIN_PATH_PREFIX "")
+else()
+    # On Unix, use original ffmpeg and relative path
+    set(TEST_FFMPEG_CMD "${FFMPEG_CMD}")
+    set(PLUGIN_PATH_PREFIX "./")
+endif()
+
+# Macro for simple single-input plugin tests (using -vf)
+# Usage: add_simple_plugin_test(test_name plugin_target params output_name)
+macro(add_simple_plugin_test TEST_NAME PLUGIN_TARGET PARAMS OUTPUT_NAME)
     add_test(NAME ${TEST_NAME}
-            COMMAND ${FFMPEG_CMD} ${INPUT_COMMAND} -y ${OUTPUT_FILE})
-endfunction()
+        COMMAND ${TEST_FFMPEG_CMD} -hide_banner -y
+            -f lavfi -i ${TEST_INPUT_LAVFI}
+            -vf "oc_plugin=plugin=${PLUGIN_PATH_PREFIX}$<TARGET_FILE_NAME:${PLUGIN_TARGET}>:params=${PARAMS}"
+            "${CMAKE_BINARY_DIR}/${OUTPUT_NAME}.mp4"
+        WORKING_DIRECTORY ${PLUGIN_DIR}
+    )
+endmacro()
 
-list(APPEND FFMPEG_CMD -hide_banner -y)
-set(BLUR_TEST_CMD ${FFMPEG_CMD} -f lavfi
-    -i testsrc=duration=3:size=640x480:rate=30
-    -vf oc_plugin=plugin=$<TARGET_FILE:blur_plugin>:params=ksize=15
-    "${CMAKE_BINARY_DIR}/test_blur.mp4")
-add_test(NAME blur_plugin_test COMMAND ${BLUR_TEST_CMD})
+# Macro for null-output plugin tests (for detection/analysis plugins)
+macro(add_null_output_test TEST_NAME PLUGIN_TARGET PARAMS INPUT_SRC EXTRA_VF)
+    if("${EXTRA_VF}" STREQUAL "")
+        set(_VF_ARG "oc_plugin=plugin=${PLUGIN_PATH_PREFIX}$<TARGET_FILE_NAME:${PLUGIN_TARGET}>:params=${PARAMS}")
+    else()
+        set(_VF_ARG "oc_plugin=plugin=${PLUGIN_PATH_PREFIX}$<TARGET_FILE_NAME:${PLUGIN_TARGET}>:params=${PARAMS},${EXTRA_VF}")
+    endif()
+    add_test(NAME ${TEST_NAME}
+        COMMAND ${TEST_FFMPEG_CMD} -hide_banner -y
+            -f lavfi -i "${INPUT_SRC}"
+            -vf "${_VF_ARG}"
+            -f null -
+        WORKING_DIRECTORY ${PLUGIN_DIR}
+    )
+endmacro()
 
-set(AVGFRAMES_TEST_CMD ${FFMPEG_CMD} -f lavfi
-    -i testsrc=duration=3:size=640x480:rate=30
-    -vf oc_plugin=plugin=$<TARGET_FILE:avgframes_plugin>:params=frames=5
-    "${CMAKE_BINARY_DIR}/test_avgframes.mp4")
-add_test(NAME avgframes_plugin_test COMMAND ${AVGFRAMES_TEST_CMD})
+# ----------------------------------------------------------------------------
+# Simple plugin tests
+# ----------------------------------------------------------------------------
+add_simple_plugin_test(blur_plugin_test blur_plugin "ksize=15" test_blur)
+add_simple_plugin_test(avgframes_plugin_test avgframes_plugin "frames=5" test_avgframes)
 
-set(SPLIT_TEST_CMD ${FFMPEG_CMD} -f lavfi
-        -i testsrc=duration=3:size=640x480:rate=30
-        -filter_complex oc_plugin=plugin=$<TARGET_FILE:split_plugin>:outputs=3:params=outputs=3[out0][out1][out2]
-        -map [out0] ${CMAKE_BINARY_DIR}/test_split_passthrough.mp4
-        -map [out1] ${CMAKE_BINARY_DIR}/test_split_gray.mp4
-        -map [out2] ${CMAKE_BINARY_DIR}/test_split_edges.mp4)
-add_test(NAME split_plugin_test COMMAND ${SPLIT_TEST_CMD})
+# ----------------------------------------------------------------------------
+# Detection plugin test (null output)
+# ----------------------------------------------------------------------------
+add_null_output_test(detect_plugin_immediate_test detect_plugin "delay=2" 
+    "smptebars=duration=3:size=640x480:rate=30" "showinfo")
 
-set(BLEND_TEST_CMD ${FFMPEG_CMD} -f lavfi
-        -i testsrc=duration=3:size=640x480:rate=30
-        -f lavfi -i color=c=blue:duration=3:size=640x480:rate=30
-        -filter_complex [0:v][1:v]oc_plugin=plugin=$<TARGET_FILE:blend_plugin>:inputs=2:params=alpha=0.5
-        ${CMAKE_BINARY_DIR}/test_blend.mp4)
-add_test(NAME blend_plugin_test COMMAND ${BLEND_TEST_CMD})
+# ----------------------------------------------------------------------------
+# Complex tests (multi-input/output, kept as-is)
+# ----------------------------------------------------------------------------
 
-set(detect_TEST_CMD ${FFMPEG_CMD} -f lavfi
-        -i smptebars=duration=3:size=640x480:rate=30
-        -vf oc_plugin=plugin=$<TARGET_FILE:detect_plugin>:params=delay=2,showinfo
-        -f null -)
-add_test(NAME detect_plugin_immediate_test COMMAND ${detect_TEST_CMD})
+# Split plugin test (1 input -> 3 outputs)
+add_test(NAME split_plugin_test
+    COMMAND ${TEST_FFMPEG_CMD} -hide_banner -y
+        -f lavfi -i ${TEST_INPUT_LAVFI}
+        -filter_complex "oc_plugin=plugin=${PLUGIN_PATH_PREFIX}$<TARGET_FILE_NAME:split_plugin>:outputs=3:params=outputs=3[out0][out1][out2]"
+        -map "[out0]" "${CMAKE_BINARY_DIR}/test_split_passthrough.mp4"
+        -map "[out1]" "${CMAKE_BINARY_DIR}/test_split_gray.mp4"
+        -map "[out2]" "${CMAKE_BINARY_DIR}/test_split_edges.mp4"
+    WORKING_DIRECTORY ${PLUGIN_DIR}
+)
+
+# Blend plugin test (2 inputs -> 1 output)
+add_test(NAME blend_plugin_test
+    COMMAND ${TEST_FFMPEG_CMD} -hide_banner -y
+        -f lavfi -i ${TEST_INPUT_LAVFI}
+        -f lavfi -i "color=c=blue:duration=3:size=640x480:rate=30"
+        -filter_complex "[0:v][1:v]oc_plugin=plugin=${PLUGIN_PATH_PREFIX}$<TARGET_FILE_NAME:blend_plugin>:inputs=2:params=alpha=0.5"
+        "${CMAKE_BINARY_DIR}/test_blend.mp4"
+    WORKING_DIRECTORY ${PLUGIN_DIR}
+)
