@@ -32,39 +32,34 @@ endif()
 
 message(STATUS "Using FFmpeg: ${FFMPEG_CMD}")
 
-# Common test video source
-set(TEST_INPUT_LAVFI "testsrc=duration=3:size=640x480:rate=30")
-
 # Plugin directory (where DLLs are built)
 set(PLUGIN_DIR "$<TARGET_FILE_DIR:blur_plugin>")
 
-# On Windows, copy ffmpeg to the plugin directory so it can load DLLs from same directory
-# Windows DLL loading is restricted and won't load from arbitrary paths
-if(WIN32)
-    get_filename_component(FFMPEG_FILENAME "${FFMPEG_CMD}" NAME)
-    set(FFMPEG_LOCAL "$<TARGET_FILE_DIR:blur_plugin>/${FFMPEG_FILENAME}")
+# Common test video source
+set(TEST_INPUT_LAVFI "testsrc=duration=3:size=640x480:rate=30")
+
+if(COPY_FFMPEG_DEPS)
+    get_filename_component(FFMPEG_DIR "${FFMPEG_CMD}" DIRECTORY)
+    get_filename_component(FFMPEG_NAME "${FFMPEG_CMD}" NAME)
     
-    # Create a custom target to copy ffmpeg before tests
-    add_custom_target(copy_ffmpeg_for_tests ALL
+    # Copy ffmpeg.exe and all DLLs from ffmpeg directory to plugin build directory
+    add_custom_target(copy_ffmpeg_deps ALL
         COMMAND ${CMAKE_COMMAND} -E copy_if_different "${FFMPEG_CMD}" "${PLUGIN_DIR}/"
-        COMMENT "Copying FFmpeg to plugin directory for testing"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${FFMPEG_DIR}/" "${PLUGIN_DIR}/"
+        COMMENT "Copying FFmpeg and dependencies to build directory"
+        VERBATIM
     )
+    add_dependencies(copy_ffmpeg_deps blur_plugin)
     
-    # Make sure plugins are built before copying ffmpeg (to ensure PLUGIN_DIR exists)
-    add_dependencies(copy_ffmpeg_for_tests blur_plugin)
-    
-    # Use the local copy of ffmpeg for tests
-    set(TEST_FFMPEG_CMD "${FFMPEG_LOCAL}")
-    # On Windows, load plugin from current directory (same as ffmpeg)
+    # Use local ffmpeg copy
+    set(TEST_FFMPEG_CMD "${PLUGIN_DIR}/${FFMPEG_NAME}")
     set(PLUGIN_PATH_PREFIX "")
 else()
-    # On Unix, use original ffmpeg and relative path
     set(TEST_FFMPEG_CMD "${FFMPEG_CMD}")
     set(PLUGIN_PATH_PREFIX "./")
 endif()
 
-# Macro for simple single-input plugin tests (using -vf)
-# Usage: add_simple_plugin_test(test_name plugin_target params output_name)
+# Macro for simple single-input plugin tests
 macro(add_simple_plugin_test TEST_NAME PLUGIN_TARGET PARAMS OUTPUT_NAME)
     add_test(NAME ${TEST_NAME}
         COMMAND ${TEST_FFMPEG_CMD} -hide_banner -y
@@ -75,7 +70,7 @@ macro(add_simple_plugin_test TEST_NAME PLUGIN_TARGET PARAMS OUTPUT_NAME)
     )
 endmacro()
 
-# Macro for null-output plugin tests (for detection/analysis plugins)
+# Macro for null-output plugin tests
 macro(add_null_output_test TEST_NAME PLUGIN_TARGET PARAMS INPUT_SRC EXTRA_VF)
     if("${EXTRA_VF}" STREQUAL "")
         set(_VF_ARG "oc_plugin=plugin=${PLUGIN_PATH_PREFIX}$<TARGET_FILE_NAME:${PLUGIN_TARGET}>:params=${PARAMS}")
@@ -104,7 +99,7 @@ add_null_output_test(detect_plugin_immediate_test detect_plugin "delay=2"
     "smptebars=duration=3:size=640x480:rate=30" "showinfo")
 
 # ----------------------------------------------------------------------------
-# Complex tests (multi-input/output, kept as-is)
+# Complex tests (multi-input/output)
 # ----------------------------------------------------------------------------
 
 # Split plugin test (1 input -> 3 outputs)

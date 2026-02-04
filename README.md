@@ -60,6 +60,16 @@ Windows restricts DLL loading paths for security reasons. When FFmpeg tries to l
 - ❌ `plugin=C:\full\path\to\libblur_plugin.dll` — **Will fail**
 - ✅ `plugin=libblur_plugin.dll` (in same directory as ffmpeg.exe) — **Works**
 
-### CTest Integration
+### CMake Option: COPY_FFMPEG_DEPS
 
-The CMake test configuration automatically handles this by copying `ffmpeg.exe` to the plugin build directory during the build process (via `POST_BUILD` event).
+On Windows, the `COPY_FFMPEG_DEPS` option (enabled by default) automatically copies `ffmpeg.exe` and all its dependent DLLs to the build directory during build, so tests can run without manual setup.
+
+```bash
+# Enabled by default on Windows
+cmake -B build
+
+# Disable if you manage dependencies manually
+cmake -B build -DCOPY_FFMPEG_DEPS=OFF
+```
+
+This option is only available on Windows and has no effect on other platforms.

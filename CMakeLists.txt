@@ -8,6 +8,10 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 option(BUILD_PLUGINS "Build example plugins" ON)
 set(FFMPEG_CMD "ffmpeg" CACHE STRING "path to ffmpeg cmd")
 
+# Windows only: copy ffmpeg and DLLs to build directory for testing
+include(CMakeDependentOption)
+cmake_dependent_option(COPY_FFMPEG_DEPS "Copy ffmpeg and DLLs to build directory for testing" ON "WIN32" OFF)
+
 # Header-only interface library
 add_library(quink_oc_plugin INTERFACE)
 target_include_directories(quink_oc_plugin INTERFACE
