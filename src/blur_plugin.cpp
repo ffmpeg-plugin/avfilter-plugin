@@ -1,7 +1,8 @@
-#include <quink_oc_plugin.h>
-#include <opencv2/imgproc.hpp>
 #include <cstdlib>
 #include <cstring>
+#include <iostream>
+#include <opencv2/imgproc.hpp>
+#include <quink_oc_plugin.h>
 
 class GaussianBlurPlugin : public QuinkOCProcessPlugin {
 public:
@@ -10,13 +11,23 @@ public:
             return false;  // Only supports 1 input and 1 output
         if (!params || !params[0]) return true;
 
-        const char *pos = strstr(params, "ksize=");
+        std::string key = "ksize=";
+        const char *pos = strstr(params, key.c_str());
         if (pos) {
-            kernel_size_ = atoi(pos + 6);
+            kernel_size_ = atoi(pos + key.size());
             if (kernel_size_ % 2 == 0)
                 kernel_size_++;
             if (kernel_size_ < 1)
                 kernel_size_ = 1;
+        }
+        key = "scale=";
+        pos = strstr(params, key.c_str());
+        if (pos) {
+            scale_ = atof(pos + key.size());
+            if (scale_ < 0) {
+                std::cerr << "scale must be non-negative." << std::endl;
+                return false;
+            }
         }
 
         return true;
@@ -26,9 +37,16 @@ public:
                                  std::vector<cv::Mat> &outputs) override {
         if (inputs.empty() || outputs.empty())
             return QUINK_OC_ERROR;
-        
-        cv::GaussianBlur(inputs[0], outputs[0],
-                         cv::Size(kernel_size_, kernel_size_), 0);
+
+        if (scale_ == 1.0f) {
+            cv::GaussianBlur(inputs[0], outputs[0],
+                             cv::Size(kernel_size_, kernel_size_), 0);
+        } else {
+            cv::resize(inputs[0], outputs[0], outputs[0].size(), 0, 0, cv::INTER_CUBIC);
+            cv::GaussianBlur(outputs[0], outputs[0],
+                            cv::Size(kernel_size_, kernel_size_), 0);
+        }
+
         return QUINK_OC_OK;
     }
 
@@ -39,13 +57,16 @@ public:
     bool configure(const std::vector<QuinkOCFrameConfig> &inputs,
                    std::vector<QuinkOCFrameConfig> &outputs) override {
         (void)inputs;
-        (void)outputs;
+        // test resize
+        outputs.front().width *= scale_;
+        outputs.front().height *= scale_;
         return true;
     }
 
     void uninit() override { }
 
 private:
+    float scale_ = 1.0f;
     int kernel_size_ = 5;
 };
 
