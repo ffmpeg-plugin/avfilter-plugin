@@ -15,6 +15,17 @@ add_plugin(avgframes)
 add_plugin(split)
 add_plugin(detect)
 
+# CUDA plugins (optional)
+find_package(OpenCV QUIET COMPONENTS cudafilters)
+if(OpenCV_cudafilters_FOUND)
+    message(STATUS "OpenCV CUDA modules found, building CUDA plugins")
+    add_plugin(cuda_blur)
+    set(HAVE_CUDA_PLUGINS TRUE)
+else()
+    message(STATUS "OpenCV CUDA modules not found, skipping CUDA plugins")
+    set(HAVE_CUDA_PLUGINS FALSE)
+endif()
+
 # ============================================================================
 # Test Configuration
 # ============================================================================
@@ -86,6 +97,18 @@ macro(add_null_output_test TEST_NAME PLUGIN_TARGET PARAMS INPUT_SRC EXTRA_VF)
     )
 endmacro()
 
+# Macro for CUDA plugin tests
+# Uses hwupload_cuda to upload frames to GPU, then applies plugin, then hwdownload
+macro(add_cuda_plugin_test TEST_NAME PLUGIN_TARGET PARAMS OUTPUT_NAME)
+    add_test(NAME ${TEST_NAME}
+        COMMAND ${TEST_FFMPEG_CMD} -hide_banner -y
+            -f lavfi -i ${TEST_INPUT_LAVFI}
+            -vf "format=bgra,hwupload_cuda,oc_plugin=plugin=${PLUGIN_PATH_PREFIX}$<TARGET_FILE_NAME:${PLUGIN_TARGET}>:params=${PARAMS},hwdownload,format=bgra"
+            "${CMAKE_BINARY_DIR}/${OUTPUT_NAME}.mp4"
+        WORKING_DIRECTORY ${PLUGIN_DIR}
+    )
+endmacro()
+
 # ----------------------------------------------------------------------------
 # Simple plugin tests
 # ----------------------------------------------------------------------------
@@ -122,3 +145,10 @@ add_test(NAME blend_plugin_test
         "${CMAKE_BINARY_DIR}/test_blend.mp4"
     WORKING_DIRECTORY ${PLUGIN_DIR}
 )
+
+# ----------------------------------------------------------------------------
+# CUDA plugin tests (if CUDA plugins are available)
+# ----------------------------------------------------------------------------
+if(HAVE_CUDA_PLUGINS)
+    add_cuda_plugin_test(cuda_blur_plugin_test cuda_blur_plugin "ksize=15" test_cuda_blur)
+endif()
