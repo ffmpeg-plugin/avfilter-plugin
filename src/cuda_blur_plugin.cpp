@@ -88,8 +88,10 @@ public:
                 surface_format_ = cv::cudacodec::SF_NV12;
             else
                 surface_format_ = cv::cudacodec::SF_P016;
-            // TODO: change colorspace
-            convert_ = cv::cudacodec::createNVSurfaceToColorConverter(cv::cudacodec::ColorSpaceStandard::BT709, !in.limited_range);
+            // There is a bug in opencv cudacodec, while makes bt2020/bt2020c don't work.
+            // I have a patch for it.
+            convert_ = cv::cudacodec::createNVSurfaceToColorConverter(
+                static_cast<cv::cudacodec::ColorSpaceStandard>(in.colorspace), !in.limited_range);
             if (!convert_)
                 return false;
             createFilter(CV_8UC4);

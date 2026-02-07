@@ -97,18 +97,6 @@ macro(add_null_output_test TEST_NAME PLUGIN_TARGET PARAMS INPUT_SRC EXTRA_VF)
     )
 endmacro()
 
-# Macro for CUDA plugin tests
-# Uses hwupload_cuda to upload frames to GPU, then applies plugin, then hwdownload
-macro(add_cuda_plugin_test TEST_NAME PLUGIN_TARGET PARAMS OUTPUT_NAME)
-    add_test(NAME ${TEST_NAME}
-        COMMAND ${TEST_FFMPEG_CMD} -hide_banner -y
-            -f lavfi -i ${TEST_INPUT_LAVFI}
-            -vf "format=bgra,hwupload_cuda,oc_plugin=plugin=${PLUGIN_PATH_PREFIX}$<TARGET_FILE_NAME:${PLUGIN_TARGET}>:params=${PARAMS},hwdownload,format=bgra"
-            "${CMAKE_BINARY_DIR}/${OUTPUT_NAME}.mp4"
-        WORKING_DIRECTORY ${PLUGIN_DIR}
-    )
-endmacro()
-
 # ----------------------------------------------------------------------------
 # Simple plugin tests
 # ----------------------------------------------------------------------------
@@ -150,5 +138,20 @@ add_test(NAME blend_plugin_test
 # CUDA plugin tests (if CUDA plugins are available)
 # ----------------------------------------------------------------------------
 if(HAVE_CUDA_PLUGINS)
-    add_cuda_plugin_test(cuda_blur_plugin_test cuda_blur_plugin "ksize=15&scale=1.5" test_cuda_blur)
+    add_test(NAME cuda_blur_plugin_test
+            COMMAND ${TEST_FFMPEG_CMD} -hide_banner -y -f lavfi -i ${TEST_INPUT_LAVFI}
+            -vf "format=bgra,hwupload_cuda,oc_plugin=plugin=${PLUGIN_PATH_PREFIX}$<TARGET_FILE_NAME:cuda_blur_plugin>:params=ksize=15&scale=1.5,hwdownload,format=bgra"
+            -pix_fmt yuv420p "${CMAKE_BINARY_DIR}/test_cuda_blur.mp4"
+            WORKING_DIRECTORY ${PLUGIN_DIR}
+    )
+    add_test(NAME cuda_transcode_test
+            COMMAND
+            ${TEST_FFMPEG_CMD} -hide_banner -y
+            -hwaccel cuda -hwaccel_output_format cuda -i "${CMAKE_BINARY_DIR}/test_cuda_blur.mp4"
+            -vf "oc_plugin=plugin=${PLUGIN_PATH_PREFIX}$<TARGET_FILE_NAME:cuda_blur_plugin>:params=scale=1.5"
+            -c:v hevc_nvenc -b:v 2M
+            "${CMAKE_BINARY_DIR}/test_cuda_trans.mp4"
+            WORKING_DIRECTORY ${PLUGIN_DIR}
+    )
+    set_tests_properties(cuda_transcode_test PROPERTIES DEPENDS cuda_blur_plugin_test)
 endif()
