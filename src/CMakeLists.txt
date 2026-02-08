@@ -82,8 +82,8 @@ add_custom_target(create_test_output_dir ALL
     COMMENT "Creating test output directory"
 )
 
-# Common lavfi test source
-set(LAVFI_SRC "testsrc=duration=3:size=640x480:rate=30")
+# Common lavfi test source (small resolution for fast testing)
+set(LAVFI_SRC "testsrc=duration=3:size=320x240:rate=30")
 
 # Path to the verification script
 set(VERIFY_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/verify_output.cmake")
@@ -168,7 +168,7 @@ add_verified_test(NAME split_test
 
 # blend_test: 2:1 blend
 add_verified_test(NAME blend_test
-    FFMPEG_ARGS "-hide_banner -y -f lavfi -i ${LAVFI_SRC} -f lavfi -i color=c=blue:duration=3:size=640x480:rate=30 -filter_complex [0:v][1:v]oc_plugin=plugin=${PLUGIN_PATH_PREFIX}$<TARGET_FILE_NAME:blend_plugin>:inputs=2:params=alpha=0.5 -c:v rawvideo -f nut ${TEST_OUT_DIR}/blend.nut"
+    FFMPEG_ARGS "-hide_banner -y -f lavfi -i ${LAVFI_SRC} -f lavfi -i color=c=blue:duration=3:size=320x240:rate=30 -filter_complex [0:v][1:v]oc_plugin=plugin=${PLUGIN_PATH_PREFIX}$<TARGET_FILE_NAME:blend_plugin>:inputs=2:params=alpha=0.5 -c:v rawvideo -f nut ${TEST_OUT_DIR}/blend.nut"
     OUTPUT_FILES "${TEST_OUT_DIR}/blend.nut"
     REF_FFMPEG_ARGS "-hide_banner -y -f lavfi -i ${LAVFI_SRC} -c:v rawvideo -f nut ${TEST_OUT_DIR}/blend_ref.nut"
     REF_OUTPUT_FILE "${TEST_OUT_DIR}/blend_ref.nut"
@@ -196,15 +196,18 @@ add_verified_test(NAME cuda_split_test
 
 # cuda_blend_test: CUDA 2:1 blend
 add_verified_test(NAME cuda_blend_test
-    FFMPEG_ARGS "-hide_banner -y -f lavfi -i ${LAVFI_SRC} -f lavfi -i color=c=blue:duration=3:size=640x480:rate=30 -filter_complex [0:v]format=bgra,hwupload_cuda[cuda0]{{SEMI}}[1:v]format=bgra,hwupload_cuda[cuda1]{{SEMI}}[cuda0][cuda1]oc_plugin=plugin=${PLUGIN_PATH_PREFIX}$<TARGET_FILE_NAME:cuda_blend_plugin>:inputs=2:params=alpha=0.5,hwdownload,format=bgra -c:v rawvideo -f nut ${TEST_OUT_DIR}/cuda_blend.nut"
+    FFMPEG_ARGS "-hide_banner -y -f lavfi -i ${LAVFI_SRC} -f lavfi -i color=c=blue:duration=3:size=320x240:rate=30 -filter_complex [0:v]format=bgra,hwupload_cuda[cuda0]{{SEMI}}[1:v]format=bgra,hwupload_cuda[cuda1]{{SEMI}}[cuda0][cuda1]oc_plugin=plugin=${PLUGIN_PATH_PREFIX}$<TARGET_FILE_NAME:cuda_blend_plugin>:inputs=2:params=alpha=0.5,hwdownload,format=bgra -c:v rawvideo -f nut ${TEST_OUT_DIR}/cuda_blend.nut"
     OUTPUT_FILES "${TEST_OUT_DIR}/cuda_blend.nut"
     REF_FFMPEG_ARGS "-hide_banner -y -f lavfi -i ${LAVFI_SRC} -vf format=bgra -c:v rawvideo -f nut ${TEST_OUT_DIR}/cuda_blend_ref.nut"
     REF_OUTPUT_FILE "${TEST_OUT_DIR}/cuda_blend_ref.nut"
     EXPECT_DIFFERENT_FROM_REF
 )
 
-# cuda_transcode_test: full hw decode -> plugin -> hw encode pipeline
-# This test specifically tests the complete CUDA pipeline with video encoding
+# cuda_transcode_test: simulate full GPU pipeline with NV12 frames and hw encode.
+# NOTE: This does NOT use hardware decode. It generates NV12 with lavfi + format filter,
+# then uploads to GPU via hwupload_cuda. This simulates the frame format that a real
+# hardware decoder (e.g., -hwaccel cuda) would produce, allowing us to test the
+# NV12 CUDA processing path and hevc_nvenc encoding without requiring a real input file.
 add_test(NAME cuda_transcode_test
     COMMAND "${TEST_FFMPEG_CMD}" -hide_banner -y -f lavfi -i "${LAVFI_SRC}"
         -vf "format=nv12,hwupload_cuda,oc_plugin=plugin=${PLUGIN_PATH_PREFIX}$<TARGET_FILE_NAME:cuda_blur_plugin>:params=ksize=15&scale=1.5"
@@ -213,4 +216,53 @@ add_test(NAME cuda_transcode_test
     WORKING_DIRECTORY ${PLUGIN_DIR}
 )
 
+endif()
+
+# ============================================================================
+# Valgrind / Sanitizer support
+# ============================================================================
+#
+# Usage examples:
+#
+#   # Run all tests under valgrind memcheck:
+#   ctest --test-dir build -T memcheck \
+#       --overwrite MemoryCheckCommand=/usr/bin/valgrind \
+#       --overwrite MemoryCheckCommandOptions="--leak-check=full --track-origins=yes --error-exitcode=1"
+#
+#   # Or configure once with cmake, then use ctest -T memcheck:
+#   cmake -B build -DVALGRIND_CMD=/usr/bin/valgrind
+#   cd build && ctest -T memcheck --output-on-failure
+#
+#   # Build with AddressSanitizer (rebuild ffmpeg and plugins with ASan):
+#   cmake -B build -DCMAKE_CXX_FLAGS="-fsanitize=address -fno-omit-frame-pointer" \
+#                  -DCMAKE_C_FLAGS="-fsanitize=address -fno-omit-frame-pointer" \
+#                  -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address" \
+#                  -DCMAKE_SHARED_LINKER_FLAGS="-fsanitize=address"
+#   cmake --build build && ctest --test-dir build --output-on-failure
+#
+#   # Build with ThreadSanitizer:
+#   cmake -B build -DCMAKE_CXX_FLAGS="-fsanitize=thread" \
+#                  -DCMAKE_C_FLAGS="-fsanitize=thread" \
+#                  -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread" \
+#                  -DCMAKE_SHARED_LINKER_FLAGS="-fsanitize=thread"
+#
+#   # NVIDIA Compute Sanitizer (for CUDA plugins):
+#   compute-sanitizer --tool memcheck \
+#       ./ffmpeg -hide_banner -y -f lavfi -i "testsrc=duration=3:size=320x240:rate=30" \
+#       -vf "format=nv12,hwupload_cuda,oc_plugin=plugin=./libcuda_blur_plugin.so:params=ksize=15" \
+#       -c:v hevc_nvenc -b:v 2M test_output/cuda_transcode.mp4
+#
+#   # Compute Sanitizer race checking:
+#   compute-sanitizer --tool racecheck \
+#       ./ffmpeg -hide_banner -y -f lavfi -i "testsrc=duration=3:size=320x240:rate=30" \
+#       -vf "format=bgra,hwupload_cuda,oc_plugin=plugin=./libcuda_blur_plugin.so:params=ksize=15,hwdownload,format=bgra" \
+#       -c:v rawvideo -f nut test_output/cuda_blur.nut
+#
+# ============================================================================
+
+# CTest memcheck integration (optional)
+if(VALGRIND_CMD)
+    set(MEMORYCHECK_COMMAND "${VALGRIND_CMD}" CACHE FILEPATH "" FORCE)
+    set(MEMORYCHECK_COMMAND_OPTIONS "--leak-check=full --track-origins=yes --error-exitcode=1" CACHE STRING "" FORCE)
+    message(STATUS "Valgrind configured: ${VALGRIND_CMD}")
 endif()
