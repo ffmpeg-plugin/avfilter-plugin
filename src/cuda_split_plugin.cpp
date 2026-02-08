@@ -21,7 +21,7 @@ public:
         const cv::cuda::GpuMat &src = inputs[0];
 
         /* Output 0: pass-through */
-        outputs[0] = src;
+        src.copyTo(outputs[0], stream);
 
         /* Output 1: Gaussian blur */
         if (cfg_.num_outputs >= 2 && blur_filter_)

@@ -47,7 +47,7 @@ public:
         computeAverage(outputs[0]);
         frame_buffer_.pop_front();
         output_count_++;
-        return !frame_buffer_.empty();
+        return true;
     }
 
     bool configure(const std::vector<quink::FrameConfig> &inputs,
