@@ -20,6 +20,8 @@ find_package(OpenCV QUIET COMPONENTS cudacodec cudafilters cudawarping cudaarith
 if(OpenCV_cudafilters_FOUND)
     message(STATUS "OpenCV CUDA modules found, building CUDA plugins")
     add_plugin(cuda_blur)
+    add_plugin(cuda_blend)
+    add_plugin(cuda_split)
     set(HAVE_CUDA_PLUGINS TRUE)
 else()
     message(STATUS "OpenCV CUDA modules not found, skipping CUDA plugins")
@@ -154,4 +156,24 @@ if(HAVE_CUDA_PLUGINS)
             WORKING_DIRECTORY ${PLUGIN_DIR}
     )
     set_tests_properties(cuda_transcode_test PROPERTIES DEPENDS cuda_blur_plugin_test)
+
+    # CUDA Split plugin test (1 input -> 3 outputs)
+    add_test(NAME cuda_split_plugin_test
+            COMMAND ${TEST_FFMPEG_CMD} -hide_banner -y
+            -f lavfi -i ${TEST_INPUT_LAVFI}
+            -filter_complex "format=bgra,hwupload_cuda,oc_plugin=plugin=${PLUGIN_PATH_PREFIX}$<TARGET_FILE_NAME:cuda_split_plugin>:outputs=3[out0][out1][out2];[out0]hwdownload,format=bgra[d0];[out1]hwdownload,format=bgra[d1];[out2]hwdownload,format=bgra[d2]"
+            -map "[d0]" "${CMAKE_BINARY_DIR}/test_cuda_split_pass.mp4"
+            -map "[d1]" "${CMAKE_BINARY_DIR}/test_cuda_split_blur.mp4"
+            -map "[d2]" "${CMAKE_BINARY_DIR}/test_cuda_split_half.mp4"
+            WORKING_DIRECTORY ${PLUGIN_DIR}
+    )
+    # CUDA Blend plugin test (2 inputs -> 1 output)
+    add_test(NAME cuda_blend_plugin_test
+            COMMAND ${TEST_FFMPEG_CMD} -hide_banner -y
+            -f lavfi -i ${TEST_INPUT_LAVFI}
+            -f lavfi -i "color=c=blue:duration=3:size=640x480:rate=30"
+            -filter_complex "[0:v]format=bgra,hwupload_cuda[cuda0];[1:v]format=bgra,hwupload_cuda[cuda1];[cuda0][cuda1]oc_plugin=plugin=${PLUGIN_PATH_PREFIX}$<TARGET_FILE_NAME:cuda_blend_plugin>:inputs=2:params=alpha=0.5,hwdownload,format=bgra"
+            "${CMAKE_BINARY_DIR}/test_cuda_blend.mp4"
+            WORKING_DIRECTORY ${PLUGIN_DIR}
+    )
 endif()
