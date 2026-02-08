@@ -62,16 +62,28 @@ if(COPY_FFMPEG_DEPS)
     add_dependencies(copy_ffmpeg_deps blur_plugin)
 
     set(TEST_FFMPEG_CMD "${PLUGIN_DIR}/${FFMPEG_NAME}")
+    # When ffmpeg is copied alongside plugins, no path prefix needed
+    set(PLUGIN_PATH_PREFIX "")
 else()
     set(TEST_FFMPEG_CMD "${FFMPEG_CMD}")
+    # On Linux/macOS, dlopen requires ./ prefix to search current directory
+    set(PLUGIN_PATH_PREFIX "./")
 endif()
 
-# Output directory for test artifacts (nut files for visual inspection, mp4 for transcode)
-set(TEST_OUT_DIR "${CMAKE_BINARY_DIR}/test_output")
-file(MAKE_DIRECTORY "${TEST_OUT_DIR}")
+# Output directory for test artifacts — use a relative path so that
+# ffmpeg arguments never contain Windows drive-letter colons (e.g., D:\...)
+# which FFmpeg's option parser would misinterpret as key:value separators.
+set(TEST_OUT_DIR "test_output")
+
+# Ensure the directory exists at build time
+add_custom_target(create_test_output_dir ALL
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${TEST_OUT_DIR}"
+    WORKING_DIRECTORY ${PLUGIN_DIR}
+    COMMENT "Creating test output directory"
+)
 
 # Common lavfi test source
-set(LAVFI_SRC "testsrc=duration=1:size=640x480:rate=30")
+set(LAVFI_SRC "testsrc=duration=3:size=640x480:rate=30")
 
 # Path to the verification script
 set(VERIFY_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/verify_output.cmake")
@@ -82,6 +94,9 @@ set(VERIFY_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/verify_output.cmake")
 # Each test runs ffmpeg directly (no bash/shell dependency, works on Windows).
 # Tests output .nut files with rawvideo codec (zero encoding overhead,
 # playable with ffplay, supports any pixel format including BGR24/BGRA).
+#
+# All paths in ffmpeg arguments use RELATIVE paths (relative to PLUGIN_DIR)
+# to avoid Windows drive-letter colon issues (D:\path mis-parsed as key:value).
 #
 # Verification:
 # - File size check (> 1KB, catches empty/broken output)
@@ -102,17 +117,15 @@ macro(add_verified_test)
         "NAME;FFMPEG_ARGS;REF_FFMPEG_ARGS;REF_OUTPUT_FILE;MIN_FILE_SIZE"
         "OUTPUT_FILES" ${ARGN})
 
-    set(_cmd ${CMAKE_COMMAND} -P "${VERIFY_SCRIPT}"
-        -DFFMPEG_CMD=${TEST_FFMPEG_CMD}
-        -DWORK_DIR=${PLUGIN_DIR}
-        -DCHECK_FRAMEMD5=TRUE
-    )
+    # Join OUTPUT_FILES with pipe separator to avoid CMake semicolon issues
+    # in add_test COMMAND. The verify script converts | back to ; internally.
+    string(REPLACE ";" "|" _VT_OUTPUT_FILES "${VT_OUTPUT_FILES}")
 
     add_test(NAME ${VT_NAME}
         COMMAND ${CMAKE_COMMAND}
             -DFFMPEG_CMD=${TEST_FFMPEG_CMD}
             -DFFMPEG_ARGS=${VT_FFMPEG_ARGS}
-            -DOUTPUT_FILES=${VT_OUTPUT_FILES}
+            -DOUTPUT_FILES=${_VT_OUTPUT_FILES}
             -DWORK_DIR=${PLUGIN_DIR}
             -DCHECK_FRAMEMD5=TRUE
             $<$<BOOL:${VT_REF_FFMPEG_ARGS}>:-DREF_FFMPEG_ARGS=${VT_REF_FFMPEG_ARGS}>
@@ -128,7 +141,7 @@ endmacro()
 
 # blur_test: 1:1 blur + scale, verify output differs from raw testsrc
 add_verified_test(NAME blur_test
-    FFMPEG_ARGS "-hide_banner -y -f lavfi -i ${LAVFI_SRC} -vf oc_plugin=plugin=$<TARGET_FILE:blur_plugin>:params=ksize=15&scale=0.5 -c:v rawvideo -f nut ${TEST_OUT_DIR}/blur.nut"
+    FFMPEG_ARGS "-hide_banner -y -f lavfi -i ${LAVFI_SRC} -vf oc_plugin=plugin=${PLUGIN_PATH_PREFIX}$<TARGET_FILE_NAME:blur_plugin>:params=ksize=15&scale=0.5 -c:v rawvideo -f nut ${TEST_OUT_DIR}/blur.nut"
     OUTPUT_FILES "${TEST_OUT_DIR}/blur.nut"
     REF_FFMPEG_ARGS "-hide_banner -y -f lavfi -i ${LAVFI_SRC} -c:v rawvideo -f nut ${TEST_OUT_DIR}/blur_ref.nut"
     REF_OUTPUT_FILE "${TEST_OUT_DIR}/blur_ref.nut"
@@ -137,25 +150,25 @@ add_verified_test(NAME blur_test
 
 # avgframes_test: buffered averaging
 add_verified_test(NAME avgframes_test
-    FFMPEG_ARGS "-hide_banner -y -f lavfi -i ${LAVFI_SRC} -vf oc_plugin=plugin=$<TARGET_FILE:avgframes_plugin>:params=frames=5 -c:v rawvideo -f nut ${TEST_OUT_DIR}/avgframes.nut"
+    FFMPEG_ARGS "-hide_banner -y -f lavfi -i ${LAVFI_SRC} -vf oc_plugin=plugin=${PLUGIN_PATH_PREFIX}$<TARGET_FILE_NAME:avgframes_plugin>:params=frames=5 -c:v rawvideo -f nut ${TEST_OUT_DIR}/avgframes.nut"
     OUTPUT_FILES "${TEST_OUT_DIR}/avgframes.nut"
 )
 
-# detect_test: detection with delay
+# detect_test: detection with delay (uses dynamic testsrc, detect plugin passes through unmodified)
 add_verified_test(NAME detect_test
-    FFMPEG_ARGS "-hide_banner -y -f lavfi -i smptebars=duration=1:size=640x480:rate=30 -vf oc_plugin=plugin=$<TARGET_FILE:detect_plugin>:params=delay=2 -c:v rawvideo -f nut ${TEST_OUT_DIR}/detect.nut"
+    FFMPEG_ARGS "-hide_banner -y -f lavfi -i ${LAVFI_SRC} -vf oc_plugin=plugin=${PLUGIN_PATH_PREFIX}$<TARGET_FILE_NAME:detect_plugin>:params=delay=2 -c:v rawvideo -f nut ${TEST_OUT_DIR}/detect.nut"
     OUTPUT_FILES "${TEST_OUT_DIR}/detect.nut"
 )
 
 # split_test: 1:3 split (pass-through, grayscale, edges)
 add_verified_test(NAME split_test
-    FFMPEG_ARGS "-hide_banner -y -f lavfi -i ${LAVFI_SRC} -filter_complex oc_plugin=plugin=$<TARGET_FILE:split_plugin>:outputs=3:params=outputs=3[out0][out1][out2] -map [out0] -c:v rawvideo -f nut ${TEST_OUT_DIR}/split_pass.nut -map [out1] -c:v rawvideo -f nut ${TEST_OUT_DIR}/split_gray.nut -map [out2] -c:v rawvideo -f nut ${TEST_OUT_DIR}/split_edges.nut"
+    FFMPEG_ARGS "-hide_banner -y -f lavfi -i ${LAVFI_SRC} -filter_complex oc_plugin=plugin=${PLUGIN_PATH_PREFIX}$<TARGET_FILE_NAME:split_plugin>:outputs=3:params=outputs=3[out0][out1][out2] -map [out0] -c:v rawvideo -f nut ${TEST_OUT_DIR}/split_pass.nut -map [out1] -c:v rawvideo -f nut ${TEST_OUT_DIR}/split_gray.nut -map [out2] -c:v rawvideo -f nut ${TEST_OUT_DIR}/split_edges.nut"
     OUTPUT_FILES "${TEST_OUT_DIR}/split_pass.nut;${TEST_OUT_DIR}/split_gray.nut;${TEST_OUT_DIR}/split_edges.nut"
 )
 
 # blend_test: 2:1 blend
 add_verified_test(NAME blend_test
-    FFMPEG_ARGS "-hide_banner -y -f lavfi -i ${LAVFI_SRC} -f lavfi -i color=c=blue:duration=1:size=640x480:rate=30 -filter_complex [0:v][1:v]oc_plugin=plugin=$<TARGET_FILE:blend_plugin>:inputs=2:params=alpha=0.5 -c:v rawvideo -f nut ${TEST_OUT_DIR}/blend.nut"
+    FFMPEG_ARGS "-hide_banner -y -f lavfi -i ${LAVFI_SRC} -f lavfi -i color=c=blue:duration=3:size=640x480:rate=30 -filter_complex [0:v][1:v]oc_plugin=plugin=${PLUGIN_PATH_PREFIX}$<TARGET_FILE_NAME:blend_plugin>:inputs=2:params=alpha=0.5 -c:v rawvideo -f nut ${TEST_OUT_DIR}/blend.nut"
     OUTPUT_FILES "${TEST_OUT_DIR}/blend.nut"
     REF_FFMPEG_ARGS "-hide_banner -y -f lavfi -i ${LAVFI_SRC} -c:v rawvideo -f nut ${TEST_OUT_DIR}/blend_ref.nut"
     REF_OUTPUT_FILE "${TEST_OUT_DIR}/blend_ref.nut"
@@ -168,7 +181,7 @@ if(HAVE_CUDA_PLUGINS)
 
 # cuda_blur_test: CUDA 1:1 blur
 add_verified_test(NAME cuda_blur_test
-    FFMPEG_ARGS "-hide_banner -y -f lavfi -i ${LAVFI_SRC} -vf format=bgra,hwupload_cuda,oc_plugin=plugin=$<TARGET_FILE:cuda_blur_plugin>:params=ksize=15&scale=1.5,hwdownload,format=bgra -c:v rawvideo -f nut ${TEST_OUT_DIR}/cuda_blur.nut"
+    FFMPEG_ARGS "-hide_banner -y -f lavfi -i ${LAVFI_SRC} -vf format=bgra,hwupload_cuda,oc_plugin=plugin=${PLUGIN_PATH_PREFIX}$<TARGET_FILE_NAME:cuda_blur_plugin>:params=ksize=15&scale=1.5,hwdownload,format=bgra -c:v rawvideo -f nut ${TEST_OUT_DIR}/cuda_blur.nut"
     OUTPUT_FILES "${TEST_OUT_DIR}/cuda_blur.nut"
     REF_FFMPEG_ARGS "-hide_banner -y -f lavfi -i ${LAVFI_SRC} -vf format=bgra -c:v rawvideo -f nut ${TEST_OUT_DIR}/cuda_blur_ref.nut"
     REF_OUTPUT_FILE "${TEST_OUT_DIR}/cuda_blur_ref.nut"
@@ -177,13 +190,13 @@ add_verified_test(NAME cuda_blur_test
 
 # cuda_split_test: CUDA 1:3 split (copyTo pass-through, blur, half-res)
 add_verified_test(NAME cuda_split_test
-    FFMPEG_ARGS "-hide_banner -y -f lavfi -i ${LAVFI_SRC} -filter_complex format=bgra,hwupload_cuda,oc_plugin=plugin=$<TARGET_FILE:cuda_split_plugin>:outputs=3[out0][out1][out2]{{SEMI}}[out0]hwdownload,format=bgra[d0]{{SEMI}}[out1]hwdownload,format=bgra[d1]{{SEMI}}[out2]hwdownload,format=bgra[d2] -map [d0] -c:v rawvideo -f nut ${TEST_OUT_DIR}/cuda_split_pass.nut -map [d1] -c:v rawvideo -f nut ${TEST_OUT_DIR}/cuda_split_blur.nut -map [d2] -c:v rawvideo -f nut ${TEST_OUT_DIR}/cuda_split_half.nut"
+    FFMPEG_ARGS "-hide_banner -y -f lavfi -i ${LAVFI_SRC} -filter_complex format=bgra,hwupload_cuda,oc_plugin=plugin=${PLUGIN_PATH_PREFIX}$<TARGET_FILE_NAME:cuda_split_plugin>:outputs=3[out0][out1][out2]{{SEMI}}[out0]hwdownload,format=bgra[d0]{{SEMI}}[out1]hwdownload,format=bgra[d1]{{SEMI}}[out2]hwdownload,format=bgra[d2] -map [d0] -c:v rawvideo -f nut ${TEST_OUT_DIR}/cuda_split_pass.nut -map [d1] -c:v rawvideo -f nut ${TEST_OUT_DIR}/cuda_split_blur.nut -map [d2] -c:v rawvideo -f nut ${TEST_OUT_DIR}/cuda_split_half.nut"
     OUTPUT_FILES "${TEST_OUT_DIR}/cuda_split_pass.nut;${TEST_OUT_DIR}/cuda_split_blur.nut;${TEST_OUT_DIR}/cuda_split_half.nut"
 )
 
 # cuda_blend_test: CUDA 2:1 blend
 add_verified_test(NAME cuda_blend_test
-    FFMPEG_ARGS "-hide_banner -y -f lavfi -i ${LAVFI_SRC} -f lavfi -i color=c=blue:duration=1:size=640x480:rate=30 -filter_complex [0:v]format=bgra,hwupload_cuda[cuda0]{{SEMI}}[1:v]format=bgra,hwupload_cuda[cuda1]{{SEMI}}[cuda0][cuda1]oc_plugin=plugin=$<TARGET_FILE:cuda_blend_plugin>:inputs=2:params=alpha=0.5,hwdownload,format=bgra -c:v rawvideo -f nut ${TEST_OUT_DIR}/cuda_blend.nut"
+    FFMPEG_ARGS "-hide_banner -y -f lavfi -i ${LAVFI_SRC} -f lavfi -i color=c=blue:duration=3:size=640x480:rate=30 -filter_complex [0:v]format=bgra,hwupload_cuda[cuda0]{{SEMI}}[1:v]format=bgra,hwupload_cuda[cuda1]{{SEMI}}[cuda0][cuda1]oc_plugin=plugin=${PLUGIN_PATH_PREFIX}$<TARGET_FILE_NAME:cuda_blend_plugin>:inputs=2:params=alpha=0.5,hwdownload,format=bgra -c:v rawvideo -f nut ${TEST_OUT_DIR}/cuda_blend.nut"
     OUTPUT_FILES "${TEST_OUT_DIR}/cuda_blend.nut"
     REF_FFMPEG_ARGS "-hide_banner -y -f lavfi -i ${LAVFI_SRC} -vf format=bgra -c:v rawvideo -f nut ${TEST_OUT_DIR}/cuda_blend_ref.nut"
     REF_OUTPUT_FILE "${TEST_OUT_DIR}/cuda_blend_ref.nut"
@@ -194,7 +207,7 @@ add_verified_test(NAME cuda_blend_test
 # This test specifically tests the complete CUDA pipeline with video encoding
 add_test(NAME cuda_transcode_test
     COMMAND "${TEST_FFMPEG_CMD}" -hide_banner -y -f lavfi -i "${LAVFI_SRC}"
-        -vf "format=nv12,hwupload_cuda,oc_plugin=plugin=$<TARGET_FILE:cuda_blur_plugin>:params=ksize=15&scale=1.5"
+        -vf "format=nv12,hwupload_cuda,oc_plugin=plugin=${PLUGIN_PATH_PREFIX}$<TARGET_FILE_NAME:cuda_blur_plugin>:params=ksize=15&scale=1.5"
         -c:v hevc_nvenc -b:v 2M
         "${TEST_OUT_DIR}/cuda_transcode.mp4"
     WORKING_DIRECTORY ${PLUGIN_DIR}
