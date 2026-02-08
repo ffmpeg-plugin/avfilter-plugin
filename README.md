@@ -131,3 +131,9 @@ cmake -B build -DCOPY_FFMPEG_DEPS=OFF
 ```
 
 This option is only available on Windows and has no effect on other platforms.
+
+## License
+
+This project is licensed under the **GNU Lesser General Public License v2.1 or later (LGPL-2.1-or-later)**. See the [LICENSE](LICENSE) file for details.
+
+> **Note on GPL compatibility**: When FFmpeg itself is built with GPL-licensed components enabled (i.e., configured with `--enable-gpl`), the combined work is governed by the **GNU General Public License (GPL)**. In that case, these plugins — as part of the combined work — are also subject to the terms of the GPL.
