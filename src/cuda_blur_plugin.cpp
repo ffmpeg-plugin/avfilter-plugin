@@ -9,7 +9,7 @@
 
 #include <iostream>
 
-class CudaGaussianBlurPlugin : public QuinkOCCudaProcessPlugin {
+class CudaGaussianBlurPlugin : public quink::CudaProcessPlugin {
 public:
     bool init(const char *params, int nb_inputs, int nb_outputs) override {
         if (nb_inputs != 1 || nb_outputs != 1)
@@ -39,18 +39,18 @@ public:
         return true;
     }
 
-    QuinkOCProcessResult process(const std::vector<cv::cuda::GpuMat> &inputs,
+    quink::ProcessResult process(const std::vector<cv::cuda::GpuMat> &inputs,
                                  std::vector<cv::cuda::GpuMat> &outputs,
                                  cv::cuda::Stream &stream) override {
         if (inputs.empty() || outputs.empty())
-            return QUINK_OC_ERROR;
+            return quink::ProcessResult::Error;
 
         cv::cuda::GpuMat tmp;
         cv::cuda::GpuMat in = inputs[0];
         if (convert_) {
             if (!convert_->convert(in, tmp, surface_format_, out_format_, cv::cudacodec::EIGHT, false, stream)) {
                 std::cerr << "Error converting NV12/P016 to BGR." << std::endl;
-                return QUINK_OC_ERROR;
+                return quink::ProcessResult::Error;
             }
             in = tmp;
         }
@@ -63,28 +63,28 @@ public:
             blur_filter_->apply(outputs[0], outputs[0], stream);
         }
 
-        return QUINK_OC_OK;
+        return quink::ProcessResult::Ok;
     }
 
     bool flush(std::vector<cv::cuda::GpuMat> &, cv::cuda::Stream &) override {
         return false;
     }
 
-    bool configure(const std::vector<QuinkOCFrameConfig> &inputs,
-                   std::vector<QuinkOCFrameConfig> &outputs) override {
-        const QuinkOCFrameConfig &in = inputs[0];
-        QuinkOCFrameConfig &out = outputs.front();
+    bool configure(const std::vector<quink::FrameConfig> &inputs,
+                   std::vector<quink::FrameConfig> &outputs) override {
+        const quink::FrameConfig &in = inputs[0];
+        quink::FrameConfig &out = outputs.front();
         // test resize
         out.width *= scale_;
         out.height *= scale_;
 
         in_pix_fmt_ = in.pix_fmt;
-        if (in.pix_fmt == QUINK_PIX_FMT_NV12 || in.pix_fmt == QUINK_PIX_FMT_P016) {
+        if (in.pix_fmt == quink::QPixelFormat::NV12 || in.pix_fmt == quink::QPixelFormat::P016) {
             // notify format change to FFmpeg
-            out.pix_fmt = QUINK_PIX_FMT_BGRA;
+            out.pix_fmt = quink::QPixelFormat::BGRA;
             // set requested output format for converter
             out_format_ = cv::cudacodec::BGRA;
-            if (in.pix_fmt == QUINK_PIX_FMT_NV12)
+            if (in.pix_fmt == quink::QPixelFormat::NV12)
                 surface_format_ = cv::cudacodec::SF_NV12;
             else
                 surface_format_ = cv::cudacodec::SF_P016;
@@ -120,7 +120,7 @@ private:
     int kernel_size_ = 5;
     float scale_ = 1.0f;
     cv::Ptr<cv::cuda::Filter> blur_filter_;
-    QuinkPixelFormat in_pix_fmt_ = QUINK_PIX_FMT_NONE;
+    quink::QPixelFormat in_pix_fmt_ = quink::QPixelFormat::None;
     cv::cudacodec::SurfaceFormat surface_format_ = cv::cudacodec::SF_NV12;
     cv::cudacodec::ColorFormat out_format_ = cv::cudacodec::UNDEFINED;
     cv::Ptr<cv::cudacodec::NVSurfaceToColorConverter> convert_;

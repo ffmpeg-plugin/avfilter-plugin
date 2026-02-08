@@ -3,7 +3,7 @@
 #include <cstdlib>
 #include <cstring>
 
-class SplitPlugin : public QuinkOCProcessPlugin {
+class SplitPlugin : public quink::ProcessPlugin {
 public:
     bool init(const char *params, int nb_inputs, int nb_outputs) override {
         (void)params;
@@ -15,10 +15,10 @@ public:
         return true;
     }
 
-    QuinkOCProcessResult process(const std::vector<cv::Mat> &inputs,
+    quink::ProcessResult process(const std::vector<cv::Mat> &inputs,
                                  std::vector<cv::Mat> &outputs) override {
         if (inputs.empty() || outputs.size() < static_cast<size_t>(num_outputs_))
-            return QUINK_OC_ERROR;
+            return quink::ProcessResult::Error;
 
         const cv::Mat &src = inputs[0];
 
@@ -40,13 +40,13 @@ public:
             cv::GaussianBlur(src, outputs[3], cv::Size(15, 15), 0);
         }
 
-        return QUINK_OC_OK;
+        return quink::ProcessResult::Ok;
     }
 
     bool flush(std::vector<cv::Mat> &) override { return false; }
 
-    bool configure(const std::vector<QuinkOCFrameConfig> &inputs,
-                   std::vector<QuinkOCFrameConfig> &outputs) override {
+    bool configure(const std::vector<quink::FrameConfig> &inputs,
+                   std::vector<quink::FrameConfig> &outputs) override {
         if (inputs.empty()) return false;
         for (auto &out : outputs) {
             out.width = inputs[0].width;

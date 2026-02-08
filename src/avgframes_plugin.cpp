@@ -4,7 +4,7 @@
 #include <cstring>
 #include <deque>
 
-class FrameAveragePlugin : public QuinkOCProcessPlugin {
+class FrameAveragePlugin : public quink::ProcessPlugin {
 public:
     FrameAveragePlugin() {}
 
@@ -24,20 +24,20 @@ public:
         return true;
     }
 
-    QuinkOCProcessResult process(const std::vector<cv::Mat> &inputs,
+    quink::ProcessResult process(const std::vector<cv::Mat> &inputs,
                                  std::vector<cv::Mat> &outputs) override {
         if (inputs.empty() || outputs.empty())
-            return QUINK_OC_ERROR;
+            return quink::ProcessResult::Error;
 
         frame_buffer_.push_back(inputs[0].clone());
 
         if (static_cast<int>(frame_buffer_.size()) < num_frames_)
-            return QUINK_OC_TRY_AGAIN;
+            return quink::ProcessResult::TryAgain;
 
         computeAverage(outputs[0]);
         frame_buffer_.pop_front();
         output_count_++;
-        return QUINK_OC_OK;
+        return quink::ProcessResult::Ok;
     }
 
     bool flush(std::vector<cv::Mat> &outputs) override {
@@ -50,8 +50,8 @@ public:
         return !frame_buffer_.empty();
     }
 
-    bool configure(const std::vector<QuinkOCFrameConfig> &inputs,
-                   std::vector<QuinkOCFrameConfig> &outputs) override {
+    bool configure(const std::vector<quink::FrameConfig> &inputs,
+                   std::vector<quink::FrameConfig> &outputs) override {
         (void)inputs;
         (void)outputs;
         return true;

@@ -3,7 +3,7 @@
 #include <cstdlib>
 #include <cstring>
 
-class AlphaBlendPlugin : public QuinkOCProcessPlugin {
+class AlphaBlendPlugin : public quink::ProcessPlugin {
 public:
     AlphaBlendPlugin() {}
 
@@ -23,10 +23,10 @@ public:
         return true;
     }
 
-    QuinkOCProcessResult process(const std::vector<cv::Mat> &inputs,
+    quink::ProcessResult process(const std::vector<cv::Mat> &inputs,
                                  std::vector<cv::Mat> &outputs) override {
         if (inputs.size() < 2 || outputs.empty())
-            return QUINK_OC_ERROR;
+            return quink::ProcessResult::Error;
 
         const cv::Mat& in1 = inputs[0];
         const cv::Mat& in2 = inputs[1];
@@ -40,7 +40,7 @@ public:
         }
 
         cv::addWeighted(in1, 1.0 - alpha_, in2_resized, alpha_, 0.0, out);
-        return QUINK_OC_OK;
+        return quink::ProcessResult::Ok;
     }
 
     bool flush(std::vector<cv::Mat> &outputs) override {
@@ -48,8 +48,8 @@ public:
         return false;
     }
 
-    bool configure(const std::vector<QuinkOCFrameConfig> &inputs,
-                   std::vector<QuinkOCFrameConfig> &outputs) override {
+    bool configure(const std::vector<quink::FrameConfig> &inputs,
+                   std::vector<quink::FrameConfig> &outputs) override {
         (void)inputs;
         (void)outputs;
         return true;

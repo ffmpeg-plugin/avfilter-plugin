@@ -4,7 +4,7 @@
 #include <opencv2/imgproc.hpp>
 #include <quink_oc_plugin.h>
 
-class GaussianBlurPlugin : public QuinkOCProcessPlugin {
+class GaussianBlurPlugin : public quink::ProcessPlugin {
 public:
     bool init(const char *params, int nb_inputs, int nb_outputs) override {
         if (nb_inputs != 1 || nb_outputs != 1)
@@ -33,10 +33,10 @@ public:
         return true;
     }
 
-    QuinkOCProcessResult process(const std::vector<cv::Mat> &inputs,
+    quink::ProcessResult process(const std::vector<cv::Mat> &inputs,
                                  std::vector<cv::Mat> &outputs) override {
         if (inputs.empty() || outputs.empty())
-            return QUINK_OC_ERROR;
+            return quink::ProcessResult::Error;
 
         if (scale_ == 1.0f) {
             cv::GaussianBlur(inputs[0], outputs[0],
@@ -47,15 +47,15 @@ public:
                             cv::Size(kernel_size_, kernel_size_), 0);
         }
 
-        return QUINK_OC_OK;
+        return quink::ProcessResult::Ok;
     }
 
     bool flush(std::vector<cv::Mat> &) override {
         return false;
     }
 
-    bool configure(const std::vector<QuinkOCFrameConfig> &inputs,
-                   std::vector<QuinkOCFrameConfig> &outputs) override {
+    bool configure(const std::vector<quink::FrameConfig> &inputs,
+                   std::vector<quink::FrameConfig> &outputs) override {
         (void)inputs;
         // test resize
         outputs.front().width *= scale_;

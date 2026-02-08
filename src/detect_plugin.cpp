@@ -1,7 +1,7 @@
 /*
  * Demo Detect Plugin
  *
- * Demonstrates the QuinkOCDetectPlugin interface with optional frame buffering.
+ * Demonstrates the quink::DetectPlugin interface with optional frame buffering.
  * This plugin simulates object detection by finding colored regions in the frame.
  *
  * Parameters:
@@ -17,7 +17,7 @@
 #include <cstring>
 #include <deque>
 
-class DemoDetectPlugin : public QuinkOCDetectPlugin {
+class DemoDetectPlugin : public quink::DetectPlugin {
 public:
     bool init(const char *params, int nb_inputs, int nb_outputs) override {
         // DETECT plugins must be 1:1
@@ -41,15 +41,15 @@ public:
         frame_buffer_.clear();
     }
 
-    QuinkOCProcessResult detect(const cv::Mat &input, cv::Mat &output,
-                                QuinkOCDetections &detections) override {
+    quink::ProcessResult detect(const cv::Mat &input, cv::Mat &output,
+                                quink::Detections &detections) override {
         detections.clear();
 
         if (delay_frames_ == 0) {
             // Immediate mode: process and return immediately
             output = input;  // Pass-through (zero-copy)
             detectColoredRegions(input, detections);
-            return QuinkOCProcessResult::QUINK_OC_OK;
+            return quink::ProcessResult::Ok;
         }
 
         // Delayed mode: buffer frames
@@ -57,7 +57,7 @@ public:
 
         if (static_cast<int>(frame_buffer_.size()) <= delay_frames_) {
             // Still buffering, no output yet
-            return QuinkOCProcessResult::QUINK_OC_TRY_AGAIN;
+            return quink::ProcessResult::TryAgain;
         }
 
         // Output the oldest buffered frame
@@ -65,10 +65,10 @@ public:
         detectColoredRegions(output, detections);
         frame_buffer_.pop_front();
 
-        return QuinkOCProcessResult::QUINK_OC_OK;
+        return quink::ProcessResult::Ok;
     }
 
-    bool flushDetect(cv::Mat &output, QuinkOCDetections &detections) override {
+    bool flushDetect(cv::Mat &output, quink::Detections &detections) override {
         detections.clear();
 
         if (frame_buffer_.empty())
@@ -86,7 +86,7 @@ private:
      * Demo detection: find colored regions in the image.
      * This simulates real detection by finding red, green, and blue regions.
      */
-    void detectColoredRegions(const cv::Mat &frame, QuinkOCDetections &detections) {
+    void detectColoredRegions(const cv::Mat &frame, quink::Detections &detections) {
         cv::Mat hsv;
         cv::cvtColor(frame, hsv, cv::COLOR_BGR2HSV);
 
