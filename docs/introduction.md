@@ -36,7 +36,61 @@ FFmpeg 的 **libavfilter** 子系统提供了丰富的视频/音频滤镜，覆�
 - 想要做一个简单的"对每帧跑一下人脸检测"，却需要先学习整个 libavfilter 架构
 - **FFmpeg 和 OpenCV 之间缺少一个简洁的桥梁**
 
-### 1.3 我们需要什么？
+### 1.3 与 OpenCV 自带 FFmpeg 集成的对比
+
+OpenCV 自身就集成了 FFmpeg 作为后端，通过 `cv::VideoCapture` 和 `cv::VideoWriter` 可以直接读写视频文件。那么，在 FFmpeg 里加 OpenCV 插件，和 OpenCV 自己调用 FFmpeg 有什么不同？
+
+#### OpenCV 的 FFmpeg 集成：面向"读/写帧"的简单场景
+
+OpenCV 调用 FFmpeg 的方式本质上是：**FFmpeg 作为 OpenCV 的 I/O 后端**。典型用法：
+
+```cpp
+cv::VideoCapture cap("input.mp4");   // FFmpeg 负责解封装 + 解码
+cv::Mat frame;
+while (cap.read(frame)) {
+    // 用 OpenCV 处理每一帧
+    cv::GaussianBlur(frame, frame, cv::Size(5, 5), 0);
+}
+cv::VideoWriter writer("output.mp4", ...);  // FFmpeg 负责编码 + 封装
+```
+
+这种模式适合 **简单的逐帧处理** 场景，但有明显的局限性：
+
+- **无法利用 FFmpeg 的 filter graph** — 不能组合 FFmpeg 内置的 200+ 个滤镜（缩放、去隔行、字幕烧录、音视频同步……），只能用 OpenCV 自己重新实现
+- **无法利用 FFmpeg 的硬件加速全流程** — `VideoCapture` 解码出来的帧是 CPU 内存中的 `cv::Mat`，即使底层解码器支持硬件加速，帧也必须经过 GPU → CPU 拷贝。无法实现 `nvdec → GPU 处理 → nvenc` 的全 GPU 路径
+- **无法利用 FFmpeg 的复杂管线能力** — 多输入（画中画、拼接）、多输出（一路输入同时输出多种分辨率）、音视频同步处理等场景，在 OpenCV 中需要自己手动管理
+- **与 FFmpeg 生态隔离** — FFmpeg 命令行、流媒体推拉（RTMP/SRT/HLS）、字幕处理、元数据操作等能力无法直接使用
+
+#### quink_oc_plugin：面向"FFmpeg 管线中的自定义处理"场景
+
+`quink_oc_plugin` 的思路恰好相反：**OpenCV 作为 FFmpeg 的处理后端**。你的处理逻辑作为 FFmpeg filter graph 中的一个节点，**嵌入到 FFmpeg 的完整管线中**：
+
+```
+输入 → 解封装 → 解码 → [FFmpeg 滤镜] → [你的 OpenCV 插件] → [FFmpeg 滤镜] → 编码 → 封装 → 输出
+```
+
+这带来了根本性的不同：
+
+| | OpenCV 调用 FFmpeg | quink_oc_plugin |
+|------|------|------|
+| **谁是主控** | OpenCV 程序 | FFmpeg（命令行或 libav* API） |
+| **FFmpeg 滤镜** | 无法使用 | 可以与任意 FFmpeg 滤镜组合 |
+| **全 GPU 路径** |  帧必须到 CPU | nvdec → CUDA 插件 → nvenc，全程 GPU |
+| **多输入/多输出** | 需手动管理 | FFmpeg 的 filter_complex 原生支持 |
+| **流媒体** | 需自己实现 | FFmpeg 原生支持 RTMP/SRT/HLS 等 |
+| **音频处理** | 需手动同步 | FFmpeg 自动处理音视频同步 |
+| **适用场景** | 简单逐帧处理、快速原型 | 生产级转码管线、流媒体、复杂滤镜链 |
+
+#### 两者互补，而非替代
+
+这两种方式各有适用场景：
+
+- **快速原型、简单逐帧处理** → 用 OpenCV 的 `VideoCapture`/`VideoWriter`，简单直接
+- **生产级转码管线、需要利用 FFmpeg 全部能力** → 用 `quink_oc_plugin`，将 OpenCV 处理嵌入 FFmpeg 管线
+
+`quink_oc_plugin` 的核心价值在于：让你既能享受 FFmpeg 作为多媒体引擎的全部能力（硬件加速、协议支持、滤镜组合），又能用 OpenCV 这个你最熟悉的工具来编写自定义处理逻辑。
+
+### 1.4 我们需要什么？
 
 我们需要一种方式，让开发者能够：
 
@@ -845,7 +899,73 @@ compute-sanitizer --tool memcheck \
 
 ---
 
-## 八、总结与展望
+## 八、获取与编译
+
+### 8.1 源码仓库
+
+带有 `vf_oc_plugin` 的 FFmpeg 源码托管在：
+
+- **FFmpeg（含 oc_plugin）**: [https://github.com/ffmpeg-plugin/FFmpeg](https://github.com/ffmpeg-plugin/FFmpeg)
+- **Demo 插件**: [https://github.com/ffmpeg-plugin/avfilter-plugin](https://github.com/ffmpeg-plugin/avfilter-plugin)
+
+### 8.2 macOS / Linux 编译
+
+在 macOS 和 Linux 上，可以从源码编译 FFmpeg 并启用 OpenCV 支持：
+
+```bash
+# 1. 克隆源码
+git clone https://github.com/ffmpeg-plugin/FFmpeg.git
+cd FFmpeg
+
+# 2. 配置（启用 libopencv）
+./configure --enable-libopencv \
+    --extra-cxxflags="$(pkg-config --cflags opencv4)" \
+    --extra-ldflags="$(pkg-config --libs opencv4)"
+
+# 3. 编译
+make -j$(nproc)
+
+# 4. 安装（可选）
+sudo make install
+```
+
+> **提示**：`--enable-libopencv` 是必需的，它会编译 `vf_oc_plugin` 滤镜。确保系统已安装 OpenCV 4.x 开发库（通过 `apt install libopencv-dev`、`brew install opencv` 或源码编译均可）。
+
+### 8.3 Windows 预编译版本
+
+对于 Windows 用户，可以直接下载预编译的 FFmpeg（含 oc_plugin 支持）：
+
+- **下载地址**: [https://github.com/ffmpeg-plugin/FFmpeg/releases/tag/v0.01](https://github.com/ffmpeg-plugin/FFmpeg/releases/tag/v0.01)
+
+下载后解压即可使用，无需编译 FFmpeg。只需要编译你自己的插件 `.dll` 即可。
+
+### 8.4 编译 Demo 插件
+
+无论使用哪种方式获取 FFmpeg，Demo 插件的编译方式相同：
+
+```bash
+git clone https://github.com/ffmpeg-plugin/avfilter-plugin.git
+cd avfilter-plugin
+cmake -B build -DFFMPEG_CMD=/path/to/ffmpeg
+cmake --build build
+ctest --test-dir build --output-on-failure
+```
+
+Windows端让cmake找到vcpkg构建的opencv package，可以使用：
+```
+cmake -B build -DFFMPEG_CMD=/path/to/ffmpeg \
+    -DCMAKE_TOOLCHAIN_FILE=${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake
+```
+
+### 8.5 项目状态
+
+> ⚠️ **当前项目处于开发阶段（Development）**，API 可能会有变化。
+
+关于是否提交到 FFmpeg 上游社区：FFmpeg 社区对于是否支持插件化架构一直存在争议，因此目前暂不考虑上游提交。计划在 **FFmpeg 8.1 发布后**，基于 FFmpeg 8.1 发布一个正式的 release 版本。
+
+---
+
+## 九、总结与展望
 
 `quink_oc_plugin` 通过插件架构，在 FFmpeg 强大的多媒体处理能力和 OpenCV 丰富的计算机视觉生态之间搭建了一座桥梁。
 
