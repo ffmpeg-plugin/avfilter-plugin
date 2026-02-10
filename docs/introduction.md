@@ -210,6 +210,8 @@ class AVFrameMatAllocator : public cv::MatAllocator {
 
 - `cv::Mat` 和 `AVFrame` **共享同一块内存**
 - 插件可以安全地保存输入 `Mat` 的引用（例如用于时域缓冲），只要 `Mat` 还活着，底层的 `AVFrame` 缓冲区就不会被释放
+- **不需要 `clone()`**：ref-counted 引用拷贝（`buffer_.push_back(inputs[0])`）就能同时保持像素数据和 AVFrame 元数据（时间戳、side data）存活
+- 保存的输入 Mat 引用还可以用于 `ref_frame`，让输出帧获得正确的时间戳（详见第 3.6 节）
 - 这对 GPU 帧同样适用：`GpuMat` 通过自定义 `Allocator` 绑定到 CUDA `AVFrame`
 
 #### 输出帧：预分配临时视图
@@ -235,12 +237,12 @@ cv::Mat output_mat(height, width, cv_type, out->data[0], out->linesize[0]);
 对于不需要修改帧内容的场景（如 Detect 插件、Split 的第一路输出），CPU 插件可以直接：
 
 ```cpp
-outputs[0] = inputs[0];  // 零拷贝：Mat 头部赋值，共享底层数据
+outputs[0].frame = inputs[0];  // 零拷贝：Mat 头部赋值，共享底层数据
 ```
 
 宿主检测到输出 `Mat` 的 `data` 指针发生了变化（指向了输入帧的缓冲区），会自动处理引用计数转移，避免任何内存拷贝。
 
-> **注意**：CUDA 插件不支持 pass-through（`outputs[0] = inputs[0]`），因为每个输出的 `GpuMat` 背后绑定了不同的 `hw_frames_ctx` 池。必须使用 `inputs[0].copyTo(outputs[0], stream)` 实现 GPU 到 GPU 的拷贝。
+> **注意**：CUDA 插件不支持 pass-through（`outputs[0].frame = inputs[0]`），因为每个输出的 `GpuMat` 背后绑定了不同的 `hw_frames_ctx` 池。必须使用 `inputs[0].copyTo(outputs[0].frame, stream)` 实现 GPU 到 GPU 的拷贝。
 
 ### 3.2 宿主内部的策略模式
 
@@ -325,22 +327,51 @@ struct QuinkOCPluginDescriptor {
 
 三个便利宏 `QUINK_OC_PROCESS_PLUGIN_ENTRY`、`QUINK_OC_CUDA_PROCESS_PLUGIN_ENTRY`、`QUINK_OC_DETECT_PLUGIN_ENTRY` 自动生成上述描述符和导出函数，插件开发者只需一行代码完成注册。
 
-### 3.6 Buffering 与 TryAgain/Flush 模式
+### 3.6 Buffering、TryAgain/Flush 与时间戳关联（API v2）
 
 并非所有滤镜都是逐帧处理的。时域滤镜（如帧平均、光流）需要缓冲多帧后才能输出。`oc_plugin` 通过 `ProcessResult::TryAgain` 和 `flush()` 机制原生支持这种模式：
 
 ```
 Frame 1 → process() → TryAgain  (缓冲中，无输出)
 Frame 2 → process() → TryAgain  (缓冲中，无输出)
-Frame 3 → process() → Ok        (输出 avg(1,2,3))
-Frame 4 → process() → Ok        (输出 avg(2,3,4))
+Frame 3 → process() → Ok        (输出 avg(1,2,3)，ref_frame=frame1 → pts=frame1.pts)
+Frame 4 → process() → Ok        (输出 avg(2,3,4)，ref_frame=frame2 → pts=frame2.pts)
 ...
-EOF     → flush()   → true      (输出 avg(N-1,N))
-        → flush()   → true      (输出 avg(N))
+EOF     → flush()   → true      (输出 avg(N-1,N)，ref_frame=frameN-1)
+        → flush()   → true      (输出 avg(N)，ref_frame=frameN)
         → flush()   → false     (完成)
 ```
 
 宿主在收到 `TryAgain` 时会自动释放预分配的输出帧（因为没有输出），在流结束时反复调用 `flush()` 直到返回 `false`。
+
+#### 时间戳关联问题与 `ref_frame` 解决方案
+
+在 API v1 中，当插件返回 `TryAgain` 后再返回 `Ok` 时，输出帧的时间戳总是来自**当次**的输入帧。例如，帧平均插件缓冲 3 帧后输出，输出帧的 pts 会错误地来自第 3 帧，而非图像数据对应的第 1 帧。
+
+API v2 引入了 `OutputFrame<T>` 模板，每个输出帧可以通过 `ref_frame` 字段指定时间戳来源：
+
+```cpp
+quink::ProcessResult process(const std::vector<cv::Mat> &inputs,
+                             std::vector<quink::ProcessOutput> &outputs) override {
+    // 保存输入引用（不需要 clone，ref-counted 引用保持像素数据和 AVFrame 存活）
+    buffer_.push_back(inputs[0]);
+
+    if (buffer_.size() < N)
+        return quink::ProcessResult::TryAgain;
+
+    computeAverage(buffer_, outputs[0].frame);
+    outputs[0].ref_frame = buffer_.front();  // ★ 使用第一帧的时间戳
+    buffer_.pop_front();
+    return quink::ProcessResult::Ok;
+}
+```
+
+**关键要点**：
+
+- `ref_frame` 为空（默认）时，自动使用当前输入帧的时间戳，**完全向后兼容**
+- 输入 Mat 是 ref-counted 的，`push_back(inputs[0])` 就够了，不需要 `clone()`
+- 不要用 `clone()` 出来的 Mat 作为 `ref_frame`，因为 clone 会丢失内部的 AVFrame 绑定
+- CUDA 插件使用 `CudaProcessOutput`，`ref_frame` 机制完全相同
 
 ---
 
@@ -497,13 +528,13 @@ public:
     }
 
     quink::ProcessResult process(const std::vector<cv::Mat> &inputs,
-                                 std::vector<cv::Mat> &outputs) override {
-        cv::GaussianBlur(inputs[0], outputs[0],
+                                 std::vector<quink::ProcessOutput> &outputs) override {
+        cv::GaussianBlur(inputs[0], outputs[0].frame,
                          cv::Size(ksize_, ksize_), 0);
         return quink::ProcessResult::Ok;
     }
 
-    bool flush(std::vector<cv::Mat> &) override { return false; }
+    bool flush(std::vector<quink::ProcessOutput> &) override { return false; }
 
 private:
     int ksize_ = 5;
@@ -541,8 +572,8 @@ public:
     }
 
     quink::ProcessResult process(const std::vector<cv::Mat> &inputs,
-                                 std::vector<cv::Mat> &outputs) override {
-        cv::addWeighted(inputs[0], 1.0 - alpha_, inputs[1], alpha_, 0.0, outputs[0]);
+                                 std::vector<quink::ProcessOutput> &outputs) override {
+        cv::addWeighted(inputs[0], 1.0 - alpha_, inputs[1], alpha_, 0.0, outputs[0].frame);
         return quink::ProcessResult::Ok;
     }
 
@@ -579,22 +610,22 @@ public:
     }
 
     quink::ProcessResult process(const std::vector<cv::Mat> &inputs,
-                                 std::vector<cv::Mat> &outputs) override {
+                                 std::vector<quink::ProcessOutput> &outputs) override {
         const cv::Mat &src = inputs[0];
 
-        outputs[0] = src;  // 零拷贝传递
+        outputs[0].frame = src;  // 零拷贝传递
 
         if (num_outputs_ >= 2) {
             cv::Mat gray;
             cv::cvtColor(src, gray, cv::COLOR_BGR2GRAY);
-            cv::cvtColor(gray, outputs[1], cv::COLOR_GRAY2BGR);
+            cv::cvtColor(gray, outputs[1].frame, cv::COLOR_GRAY2BGR);
         }
 
         if (num_outputs_ >= 3) {
             cv::Mat gray, edges;
             cv::cvtColor(src, gray, cv::COLOR_BGR2GRAY);
             cv::Canny(gray, edges, 50, 150);
-            cv::cvtColor(edges, outputs[2], cv::COLOR_GRAY2BGR);
+            cv::cvtColor(edges, outputs[2].frame, cv::COLOR_GRAY2BGR);
         }
 
         return quink::ProcessResult::Ok;
@@ -614,9 +645,9 @@ ffmpeg -i input.mp4 \
     -map "[out0]" pass.mp4 -map "[out1]" gray.mp4 -map "[out2]" edges.mp4
 ```
 
-### 5.6 示例四：帧缓冲插件 — TryAgain/Flush 模式
+### 5.6 示例四：帧缓冲插件 — TryAgain/Flush 与 ref_frame
 
-帧平均插件：缓冲 N 帧后输出它们的平均值，展示了 `TryAgain` 和 `flush()` 的完整用法：
+帧平均插件：缓冲 N 帧后输出它们的平均值，展示了 `TryAgain`、`flush()` 和 `ref_frame` 时间戳关联的完整用法：
 
 ```cpp
 class FrameAveragePlugin : public quink::ProcessPlugin {
@@ -631,21 +662,25 @@ public:
     }
 
     quink::ProcessResult process(const std::vector<cv::Mat> &inputs,
-                                 std::vector<cv::Mat> &outputs) override {
-        // 缓冲输入帧（必须 clone，因为要在 process() 之后保留）
-        buffer_.push_back(inputs[0].clone());
+                                 std::vector<quink::ProcessOutput> &outputs) override {
+        // 保存输入引用（不需要 clone！ref-counted 引用保持像素数据和 AVFrame 存活）
+        buffer_.push_back(inputs[0]);
 
         if (static_cast<int>(buffer_.size()) < num_frames_)
             return quink::ProcessResult::TryAgain;  // 帧不够，继续缓冲
 
-        computeAverage(outputs[0]);
+        computeAverage(outputs[0].frame);
+        // ★ 使用最早缓冲帧的时间戳
+        outputs[0].ref_frame = buffer_.front();
         buffer_.pop_front();
         return quink::ProcessResult::Ok;
     }
 
-    bool flush(std::vector<cv::Mat> &outputs) override {
+    bool flush(std::vector<quink::ProcessOutput> &outputs) override {
         if (buffer_.empty()) return false;
-        computeAverage(outputs[0]);
+        computeAverage(outputs[0].frame);
+        // ★ flush 中同样使用 ref_frame
+        outputs[0].ref_frame = buffer_.front();
         buffer_.pop_front();
         return true;  // 还有更多帧需要输出
     }
@@ -666,11 +701,15 @@ private:
     }
 
     int num_frames_ = 3;
-    std::deque<cv::Mat> buffer_;
+    std::deque<cv::Mat> buffer_;  // Ref-counted 输入 Mat（像素数据 + 时间戳）
 };
 ```
 
-注意 `inputs[0].clone()` — 因为输入 `Mat` 的底层数据是 `AVFrame` 的缓冲区，如果插件只保存 `Mat` 引用（不 clone），虽然数据不会被释放（引用计数保证），但会阻止 FFmpeg 回收帧缓冲区，可能导致缓冲池耗尽。对于需要长时间保持多帧的场景，`clone()` 到自己的内存是更安全的做法。
+**关键变化（相比 API v1）**：
+
+1. **不需要 `clone()`**：`buffer_.push_back(inputs[0])` 就够了。输入 Mat 是 ref-counted 的，保存引用就能保持像素数据和 AVFrame 元数据存活
+2. **`ref_frame` 传递时间戳**：`outputs[0].ref_frame = buffer_.front()` 让 FFmpeg 使用第一帧的 pts，而非当前帧的 pts
+3. **如果不设 `ref_frame`（默认为空）**：自动回退到当前输入帧的时间戳，完全向后兼容
 
 ### 5.7 示例五：目标检测插件
 
@@ -764,7 +803,7 @@ public:
     }
 
     quink::ProcessResult process(const std::vector<cv::cuda::GpuMat> &inputs,
-                                 std::vector<cv::cuda::GpuMat> &outputs,
+                                 std::vector<quink::CudaProcessOutput> &outputs,
                                  cv::cuda::Stream &stream) override {
         cv::cuda::GpuMat in = inputs[0];
 
@@ -776,11 +815,11 @@ public:
             in = bgra;
         }
 
-        blur_->apply(in, outputs[0], stream);
+        blur_->apply(in, outputs[0].frame, stream);
         return quink::ProcessResult::Ok;
     }
 
-    bool flush(std::vector<cv::cuda::GpuMat> &, cv::cuda::Stream &) override {
+    bool flush(std::vector<quink::CudaProcessOutput> &, cv::cuda::Stream &) override {
         return false;
     }
 

@@ -25,26 +25,34 @@ public:
     }
 
     quink::ProcessResult process(const std::vector<cv::Mat> &inputs,
-                                 std::vector<cv::Mat> &outputs) override {
+                                 std::vector<quink::ProcessOutput> &outputs) override {
         if (inputs.empty() || outputs.empty())
             return quink::ProcessResult::Error;
 
-        frame_buffer_.push_back(inputs[0].clone());
+        /* Save a ref-counted reference to the input Mat.
+         * tie_refcount=true in wrapFrame() ensures the underlying AVFrame
+         * (and its pixel buffer) stays alive as long as we hold this Mat.
+         * This serves both pixel averaging and timestamp tracking. */
+        frame_buffer_.push_back(inputs[0]);
 
         if (static_cast<int>(frame_buffer_.size()) < num_frames_)
             return quink::ProcessResult::TryAgain;
 
-        computeAverage(outputs[0]);
+        computeAverage(outputs[0].frame);
+        /* Associate output with the oldest buffered input's timestamp */
+        outputs[0].ref_frame = frame_buffer_.front();
         frame_buffer_.pop_front();
         output_count_++;
         return quink::ProcessResult::Ok;
     }
 
-    bool flush(std::vector<cv::Mat> &outputs) override {
+    bool flush(std::vector<quink::ProcessOutput> &outputs) override {
         if (frame_buffer_.empty() || outputs.empty())
             return false;
         
-        computeAverage(outputs[0]);
+        computeAverage(outputs[0].frame);
+        /* Associate output with the oldest buffered input's timestamp */
+        outputs[0].ref_frame = frame_buffer_.front();
         frame_buffer_.pop_front();
         output_count_++;
         return true;
@@ -57,7 +65,9 @@ public:
         return true;
     }
 
-    void uninit() override { frame_buffer_.clear(); }
+    void uninit() override {
+        frame_buffer_.clear();
+    }
 
 private:
     void computeAverage(cv::Mat &output) {
@@ -78,7 +88,7 @@ private:
     }
 
     int num_frames_ = 3;
-    std::deque<cv::Mat> frame_buffer_;
+    std::deque<cv::Mat> frame_buffer_;   ///< Ref-counted input Mats (pixel data + timestamp)
     int output_count_ = 0;
 };
 

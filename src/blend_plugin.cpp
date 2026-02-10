@@ -10,7 +10,7 @@ public:
     }
 
     quink::ProcessResult process(const std::vector<cv::Mat> &inputs,
-                                 std::vector<cv::Mat> &outputs) override {
+                                 std::vector<quink::ProcessOutput> &outputs) override {
         if (inputs.size() < 2 || outputs.empty())
             return quink::ProcessResult::Error;
 
@@ -20,11 +20,11 @@ public:
         else
             in2_resized = inputs[1];
 
-        cv::addWeighted(inputs[0], 1.0 - params_.alpha, in2_resized, params_.alpha, 0.0, outputs[0]);
+        cv::addWeighted(inputs[0], 1.0 - params_.alpha, in2_resized, params_.alpha, 0.0, outputs[0].frame);
         return quink::ProcessResult::Ok;
     }
 
-    bool flush(std::vector<cv::Mat> &) override { return false; }
+    bool flush(std::vector<quink::ProcessOutput> &) override { return false; }
 
     bool configure(const std::vector<quink::FrameConfig> &,
                    std::vector<quink::FrameConfig> &) override {

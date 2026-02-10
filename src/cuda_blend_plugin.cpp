@@ -11,7 +11,7 @@ public:
     }
 
     quink::ProcessResult process(const std::vector<cv::cuda::GpuMat> &inputs,
-                                 std::vector<cv::cuda::GpuMat> &outputs,
+                                 std::vector<quink::CudaProcessOutput> &outputs,
                                  cv::cuda::Stream &stream) override {
         if (inputs.size() < 2 || outputs.empty())
             return quink::ProcessResult::Error;
@@ -22,22 +22,22 @@ public:
         else
             in1_resized = inputs[1];
 
-        cv::cuda::addWeighted(inputs[0], 1.0 - params_.alpha, in1_resized, params_.alpha, 0.0, outputs[0], -1, stream);
+        cv::cuda::addWeighted(inputs[0], 1.0 - params_.alpha, in1_resized, params_.alpha, 0.0, outputs[0].frame, -1, stream);
 
         for (size_t i = 2; i < inputs.size(); i++) {
             cv::cuda::GpuMat extra;
-            if (inputs[i].size() != outputs[0].size())
-                cv::cuda::resize(inputs[i], extra, outputs[0].size(), 0, 0, cv::INTER_LINEAR, stream);
+            if (inputs[i].size() != outputs[0].frame.size())
+                cv::cuda::resize(inputs[i], extra, outputs[0].frame.size(), 0, 0, cv::INTER_LINEAR, stream);
             else
                 extra = inputs[i];
             double w = 1.0 / (i + 1);
-            cv::cuda::addWeighted(outputs[0], 1.0 - w, extra, w, 0.0, outputs[0], -1, stream);
+            cv::cuda::addWeighted(outputs[0].frame, 1.0 - w, extra, w, 0.0, outputs[0].frame, -1, stream);
         }
 
         return quink::ProcessResult::Ok;
     }
 
-    bool flush(std::vector<cv::cuda::GpuMat> &, cv::cuda::Stream &) override { return false; }
+    bool flush(std::vector<quink::CudaProcessOutput> &, cv::cuda::Stream &) override { return false; }
 
     bool configure(const std::vector<quink::FrameConfig> &inputs,
                    std::vector<quink::FrameConfig> &outputs) override {

@@ -150,6 +150,50 @@ enum class ProcessResult : int {
 };
 ```
 
+#### `quink::OutputFrame<FrameType>` (API v2)
+
+Output frame descriptor template. Contains the output image buffer plus an optional reference
+to an input frame for timestamp/metadata association.
+
+```cpp
+template <typename FrameType>
+struct OutputFrame {
+    FrameType frame;       // Output image (pre-allocated by FFmpeg, write into it)
+    FrameType ref_frame;   // Optional: reference input frame for timestamp/metadata
+};
+
+using ProcessOutput = OutputFrame<cv::Mat>;              // CPU output descriptor
+using CudaProcessOutput = OutputFrame<cv::cuda::GpuMat>; // CUDA output descriptor
+```
+
+| Field | Description |
+|-------|-------------|
+| `frame` | Pre-allocated output buffer. Write your result here (same rules as before). |
+| `ref_frame` | **Optional.** Set to a previously received input Mat/GpuMat to copy that input's timestamp and side data to this output. If left empty (default), the current call's input is used. |
+
+**Why `ref_frame`?**
+
+When a plugin buffers frames (returns `TryAgain` for frames 1–2, then `Ok` for frame 3),
+the output image may correspond to frame 1, not frame 3. Without `ref_frame`, FFmpeg would
+assign frame 3's timestamp to the output — causing timestamp mismatch.
+
+By setting `ref_frame` to the saved input Mat from frame 1, FFmpeg retrieves the correct
+timestamp directly from the AVFrame bound to that Mat.
+
+**Usage pattern:**
+
+```cpp
+// In process(): save inputs by reference (cheap, ref-counted)
+buffer_.push_back(inputs[0]);   // No clone needed — keeps pixel data + AVFrame alive
+
+// When producing output:
+outputs[0].ref_frame = buffer_.front();  // Use first frame's timestamp
+buffer_.pop_front();
+```
+
+> **Important:** `ref_frame` must be an unmodified input Mat/GpuMat from a previous `process()` call
+> (or the current one). Do not use a `clone()` — cloned Mats lose the internal AVFrame binding.
+
 #### `quink::Detections`
 
 ```cpp
@@ -197,8 +241,8 @@ For CPU-based frame transformation. Inherits `PluginBase`.
 class ProcessPlugin : public PluginBase {
 public:
     virtual ProcessResult process(const std::vector<cv::Mat> &inputs,
-                                  std::vector<cv::Mat> &outputs) = 0;
-    virtual bool flush(std::vector<cv::Mat> &outputs) = 0;
+                                  std::vector<ProcessOutput> &outputs) = 0;
+    virtual bool flush(std::vector<ProcessOutput> &outputs) = 0;
     virtual bool configure(const std::vector<FrameConfig> &inputs,
                            std::vector<FrameConfig> &outputs) = 0;
 };
@@ -214,9 +258,10 @@ public:
 
 | ✅ Allowed | ❌ Not Allowed |
 |-----------|---------------|
-| `inputs[0].copyTo(outputs[0])` — write to pre-allocated buffer | `outputs[0] = inputs[0].clone()` — creates new allocation |
-| `outputs[0] = inputs[0]` — zero-copy pass-through | `outputs[0].create(...)` — reallocates buffer |
-| `cv::GaussianBlur(inputs[0], outputs[0], ...)` — in-place OpenCV ops | Saving reference to `outputs` beyond `process()` |
+| `inputs[0].copyTo(outputs[0].frame)` — write to pre-allocated buffer | `outputs[0].frame = inputs[0].clone()` — creates new allocation |
+| `outputs[0].frame = inputs[0]` — zero-copy pass-through | `outputs[0].frame.create(...)` — reallocates buffer |
+| `cv::GaussianBlur(inputs[0], outputs[0].frame, ...)` — in-place OpenCV ops | Saving reference to `outputs[i].frame` beyond `process()` |
+| `outputs[0].ref_frame = saved_input` — associate timestamp | Using a `clone()`'d Mat as `ref_frame` (loses AVFrame binding) |
 
 ---
 
@@ -228,9 +273,9 @@ For GPU-based frame transformation. Inherits `PluginBase`.
 class CudaProcessPlugin : public PluginBase {
 public:
     virtual ProcessResult process(const std::vector<cv::cuda::GpuMat> &inputs,
-                                  std::vector<cv::cuda::GpuMat> &outputs,
+                                  std::vector<CudaProcessOutput> &outputs,
                                   cv::cuda::Stream &stream) = 0;
-    virtual bool flush(std::vector<cv::cuda::GpuMat> &outputs,
+    virtual bool flush(std::vector<CudaProcessOutput> &outputs,
                        cv::cuda::Stream &stream) = 0;
     virtual bool configure(const std::vector<FrameConfig> &inputs,
                            std::vector<FrameConfig> &outputs) = 0;
@@ -247,9 +292,9 @@ public:
 
 | ✅ Allowed | ❌ Not Allowed |
 |-----------|---------------|
-| `inputs[0].copyTo(outputs[0], stream)` | `outputs[0] = inputs[0]` — pass-through NOT supported (hw_frames_ctx mismatch) |
-| OpenCV CUDA functions writing into `outputs[i]` | `outputs[0] = inputs[0].clone()` |
-| | `outputs[0].create(...)` |
+| `inputs[0].copyTo(outputs[0].frame, stream)` | `outputs[0].frame = inputs[0]` — pass-through NOT supported (hw_frames_ctx mismatch) |
+| OpenCV CUDA functions writing into `outputs[i].frame` | `outputs[0].frame = inputs[0].clone()` |
+| `outputs[0].ref_frame = saved_input` — associate timestamp | `outputs[0].frame.create(...)` |
 
 > **Why no pass-through for CUDA?** Each output GpuMat is backed by a different `hw_frames_ctx` pool. Swapping the underlying buffer would invalidate FFmpeg's resource tracking. Use `copyTo(output, stream)` for pass-through semantics.
 
@@ -294,7 +339,7 @@ C-compatible struct for ABI stability across the `dlopen` boundary.
 
 ```cpp
 struct QuinkOCPluginDescriptor {
-    int api_version;            // Must be QUINK_OC_PLUGIN_API_VERSION (currently 1)
+    int api_version;            // Must be QUINK_OC_PLUGIN_API_VERSION (currently 2)
     const char *name;           // Plugin name (for logging)
     const char *description;    // Human-readable description
     unsigned int capabilities;  // Bitmask of quink::Capability flags
@@ -335,8 +380,9 @@ Understanding the memory model is critical for correct plugin implementation.
 |----------|--------------|------------------------|
 | Ownership | Refcount-tied to AVFrame | Refcount-tied to AVFrame |
 | Zero-copy | ✅ Mat wraps AVFrame data directly | ✅ GpuMat wraps CUDA AVFrame data |
-| Safe to save reference | ✅ Yes (for buffering / pass-through) | ✅ Yes (for buffering) |
+| Safe to save reference | ✅ Yes (for buffering / pass-through / ref_frame) | ✅ Yes (for buffering / ref_frame) |
 | Lifetime | Stays alive as long as any cv::Mat copy exists | Stays alive as long as refcount > 0 |
+| Deep copy needed? | ❌ No — ref-counted copy keeps pixel data alive | ❌ No — ref-counted copy keeps pixel data alive |
 
 ### Output Frames
 
@@ -350,9 +396,14 @@ Understanding the memory model is critical for correct plugin implementation.
 ### Summary
 
 ```
-Input  = "borrowed reference with refcount"  → safe to keep
-Output = "temporary view of FFmpeg buffer"   → write and forget
+Input  = "borrowed reference with refcount"  → safe to keep, use as ref_frame
+Output = "temporary view of FFmpeg buffer"   → write into .frame and forget
 ```
+
+> **API v2 Key Insight:** Because input Mats are ref-counted and keep the underlying AVFrame alive,
+> you do **not** need to `clone()` inputs for buffering. A simple `buffer_.push_back(inputs[0])` is
+> sufficient — it keeps both the pixel data and the AVFrame metadata (timestamps, side data) alive.
+> This same Mat can later be used as `ref_frame` for correct timestamp association.
 
 ---
 
@@ -485,12 +536,12 @@ public:
     }
 
     quink::ProcessResult process(const std::vector<cv::Mat> &inputs,
-                                 std::vector<cv::Mat> &outputs) override {
-        cv::GaussianBlur(inputs[0], outputs[0], cv::Size(ksize_, ksize_), 0);
+                                 std::vector<quink::ProcessOutput> &outputs) override {
+        cv::GaussianBlur(inputs[0], outputs[0].frame, cv::Size(ksize_, ksize_), 0);
         return quink::ProcessResult::Ok;
     }
 
-    bool flush(std::vector<cv::Mat> &) override { return false; }
+    bool flush(std::vector<quink::ProcessOutput> &) override { return false; }
 
 private:
     int ksize_ = 5;
@@ -533,12 +584,12 @@ public:
     }
 
     quink::ProcessResult process(const std::vector<cv::Mat> &inputs,
-                                 std::vector<cv::Mat> &outputs) override {
-        cv::addWeighted(inputs[0], 1.0 - alpha_, inputs[1], alpha_, 0.0, outputs[0]);
+                                 std::vector<quink::ProcessOutput> &outputs) override {
+        cv::addWeighted(inputs[0], 1.0 - alpha_, inputs[1], alpha_, 0.0, outputs[0].frame);
         return quink::ProcessResult::Ok;
     }
 
-    bool flush(std::vector<cv::Mat> &) override { return false; }
+    bool flush(std::vector<quink::ProcessOutput> &) override { return false; }
 
 private:
     double alpha_ = 0.5;
@@ -584,20 +635,20 @@ public:
     }
 
     quink::ProcessResult process(const std::vector<cv::Mat> &inputs,
-                                 std::vector<cv::Mat> &outputs) override {
+                                 std::vector<quink::ProcessOutput> &outputs) override {
         // Output 0: pass-through (zero-copy)
-        outputs[0] = inputs[0];
+        outputs[0].frame = inputs[0];
 
         // Output 1: grayscale
         if (num_outputs_ >= 2) {
             cv::Mat gray;
             cv::cvtColor(inputs[0], gray, cv::COLOR_BGR2GRAY);
-            cv::cvtColor(gray, outputs[1], cv::COLOR_GRAY2BGR);
+            cv::cvtColor(gray, outputs[1].frame, cv::COLOR_GRAY2BGR);
         }
         return quink::ProcessResult::Ok;
     }
 
-    bool flush(std::vector<cv::Mat> &) override { return false; }
+    bool flush(std::vector<quink::ProcessOutput> &) override { return false; }
 
 private:
     int num_outputs_ = 2;
@@ -616,7 +667,8 @@ ffmpeg -i input.mp4 \
 
 ### Buffered Plugin with TryAgain/Flush
 
-Averages N consecutive frames (temporal filter). Demonstrates the buffering pattern:
+Averages N consecutive frames (temporal filter). Demonstrates the buffering pattern
+with correct timestamp association using `ref_frame`:
 
 ```cpp
 #include <quink_oc_plugin.h>
@@ -639,21 +691,26 @@ public:
                    std::vector<quink::FrameConfig> &) override { return true; }
 
     quink::ProcessResult process(const std::vector<cv::Mat> &inputs,
-                                 std::vector<cv::Mat> &outputs) override {
-        // Buffer input (must clone since we keep it beyond process())
-        buffer_.push_back(inputs[0].clone());
+                                 std::vector<quink::ProcessOutput> &outputs) override {
+        // Save input by reference (no clone needed!).
+        // The ref-counted Mat keeps both pixel data and AVFrame metadata alive.
+        buffer_.push_back(inputs[0]);
 
         if (static_cast<int>(buffer_.size()) < num_frames_)
             return quink::ProcessResult::TryAgain;  // Not enough frames yet
 
-        computeAverage(outputs[0]);
+        computeAverage(outputs[0].frame);
+        // ★ Associate output with the oldest buffered input's timestamp
+        outputs[0].ref_frame = buffer_.front();
         buffer_.pop_front();
         return quink::ProcessResult::Ok;
     }
 
-    bool flush(std::vector<cv::Mat> &outputs) override {
+    bool flush(std::vector<quink::ProcessOutput> &outputs) override {
         if (buffer_.empty()) return false;
-        computeAverage(outputs[0]);
+        computeAverage(outputs[0].frame);
+        // ★ Same ref_frame pattern in flush
+        outputs[0].ref_frame = buffer_.front();
         buffer_.pop_front();
         return true;  // More frames may remain
     }
@@ -672,7 +729,7 @@ private:
     }
 
     int num_frames_ = 3;
-    std::deque<cv::Mat> buffer_;
+    std::deque<cv::Mat> buffer_;  // Ref-counted input Mats (pixel data + timestamp)
 };
 
 QUINK_OC_PROCESS_PLUGIN_ENTRY(AvgPlugin, "avgframes", "Temporal frame averaging")
@@ -683,10 +740,15 @@ QUINK_OC_PROCESS_PLUGIN_ENTRY(AvgPlugin, "avgframes", "Temporal frame averaging"
 ```
 Frame 1 → TryAgain (buffered: [1])
 Frame 2 → TryAgain (buffered: [1, 2])
-Frame 3 → Ok, output avg(1,2,3) (buffered: [2, 3])
-Frame 4 → Ok, output avg(2,3,4) (buffered: [3, 4])
-EOF     → flush: output avg(3,4), then avg(4), then false
+Frame 3 → Ok, output avg(1,2,3), ref_frame=frame1 → pts=frame1.pts (buffered: [2, 3])
+Frame 4 → Ok, output avg(2,3,4), ref_frame=frame2 → pts=frame2.pts (buffered: [3, 4])
+EOF     → flush: output avg(3,4) ref_frame=frame3, then avg(4) ref_frame=frame4, then false
 ```
+
+> **API v2 Key Change:** No `clone()` needed for buffering. Input Mats are ref-counted — saving
+> a reference (`buffer_.push_back(inputs[0])`) keeps the pixel data alive and preserves the internal
+> AVFrame binding needed for `ref_frame` to work. Using `clone()` would break `ref_frame` because
+> cloned Mats lose the AVFrame association.
 
 ---
 
@@ -742,6 +804,9 @@ The host automatically converts `detections` into `AV_FRAME_DATA_DETECTION_BBOXE
 ### CUDA Process Plugin
 
 GPU-accelerated blur. CUDA plugins are designed for full-GPU transcoding pipelines (hw decode → plugin → hw encode) where frames never touch CPU memory.
+
+> **Note:** CUDA plugins use `CudaProcessOutput` instead of `ProcessOutput`. The `ref_frame` mechanism
+> works identically — save input GpuMats by reference and assign to `outputs[0].ref_frame` when needed.
 
 > **⚠️ Key Point: NV12/P016 → BGRA Conversion**
 >
@@ -845,7 +910,7 @@ public:
     }
 
     quink::ProcessResult process(const std::vector<cv::cuda::GpuMat> &inputs,
-                                 std::vector<cv::cuda::GpuMat> &outputs,
+                                 std::vector<quink::CudaProcessOutput> &outputs,
                                  cv::cuda::Stream &stream) override {
         cv::cuda::GpuMat in = inputs[0];
 
@@ -860,12 +925,12 @@ public:
         }
 
         // Process in BGRA (or BGR) space → write directly to output
-        filter_->apply(in, outputs[0], stream);
+        filter_->apply(in, outputs[0].frame, stream);
 
         return quink::ProcessResult::Ok;
     }
 
-    bool flush(std::vector<cv::cuda::GpuMat> &, cv::cuda::Stream &) override {
+    bool flush(std::vector<quink::CudaProcessOutput> &, cv::cuda::Stream &) override {
         return false;
     }
 

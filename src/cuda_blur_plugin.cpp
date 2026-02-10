@@ -12,7 +12,7 @@ public:
     }
 
     quink::ProcessResult process(const std::vector<cv::cuda::GpuMat> &inputs,
-                                 std::vector<cv::cuda::GpuMat> &outputs,
+                                 std::vector<quink::CudaProcessOutput> &outputs,
                                  cv::cuda::Stream &stream) override {
         if (inputs.empty() || outputs.empty())
             return quink::ProcessResult::Error;
@@ -28,16 +28,16 @@ public:
         }
 
         if (params_.scale == 1.0f) {
-            blur_filter_->apply(in, outputs[0], stream);
+            blur_filter_->apply(in, outputs[0].frame, stream);
         } else {
-            cv::cuda::resize(in, outputs[0], outputs[0].size(), 0, 0, cv::INTER_LINEAR, stream);
-            blur_filter_->apply(outputs[0], outputs[0], stream);
+            cv::cuda::resize(in, outputs[0].frame, outputs[0].frame.size(), 0, 0, cv::INTER_LINEAR, stream);
+            blur_filter_->apply(outputs[0].frame, outputs[0].frame, stream);
         }
 
         return quink::ProcessResult::Ok;
     }
 
-    bool flush(std::vector<cv::cuda::GpuMat> &, cv::cuda::Stream &) override { return false; }
+    bool flush(std::vector<quink::CudaProcessOutput> &, cv::cuda::Stream &) override { return false; }
 
     bool configure(const std::vector<quink::FrameConfig> &inputs,
                    std::vector<quink::FrameConfig> &outputs) override {
