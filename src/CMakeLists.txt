@@ -15,6 +15,121 @@ add_plugin(avgframes)
 add_plugin(split)
 add_plugin(detect)
 
+# ONNX Runtime plugins (optional)
+find_path(ORT_INCLUDE_DIR onnxruntime_cxx_api.h
+    PATHS
+        /opt/homebrew/include/onnxruntime
+        /usr/local/include/onnxruntime
+        /usr/include/onnxruntime
+        $ENV{ONNXRUNTIME_ROOT}/include
+    PATH_SUFFIXES onnxruntime
+)
+find_library(ORT_LIBRARY NAMES onnxruntime
+    PATHS
+        /opt/homebrew/lib
+        /usr/local/lib
+        /usr/lib
+        $ENV{ONNXRUNTIME_ROOT}/lib
+)
+
+if(ORT_INCLUDE_DIR AND ORT_LIBRARY)
+    message(STATUS "ONNX Runtime found: ${ORT_LIBRARY}")
+    message(STATUS "ONNX Runtime headers: ${ORT_INCLUDE_DIR}")
+
+    # Detect available hardware Execution Providers and set compile definitions.
+    # Each EP is guarded by a preprocessor macro (USE_CUDA, USE_TENSORRT, etc.)
+    # so that the plugin code only attempts to register EPs that were compiled in.
+    set(ONNX_EP_DEFS "")
+
+    # NVIDIA CUDA EP
+    find_package(CUDAToolkit QUIET)
+    if(CUDAToolkit_FOUND)
+        list(APPEND ONNX_EP_DEFS USE_CUDA)
+        message(STATUS "  ONNX EP: CUDA enabled (CUDA ${CUDAToolkit_VERSION})")
+    endif()
+
+    # NVIDIA TensorRT EP
+    find_library(NVINFER_LIBRARY NAMES nvinfer PATHS /usr/lib/x86_64-linux-gnu /usr/local/lib)
+    if(NVINFER_LIBRARY)
+        list(APPEND ONNX_EP_DEFS USE_TENSORRT)
+        message(STATUS "  ONNX EP: TensorRT enabled (${NVINFER_LIBRARY})")
+    endif()
+
+    # Intel OpenVINO EP
+    find_package(OpenVINO QUIET)
+    if(OpenVINO_FOUND)
+        list(APPEND ONNX_EP_DEFS USE_OPENVINO)
+        message(STATUS "  ONNX EP: OpenVINO enabled")
+    endif()
+
+    # AMD ROCm EP
+    if(EXISTS "/opt/rocm/lib/libamdhip64.so")
+        list(APPEND ONNX_EP_DEFS USE_ROCM)
+        message(STATUS "  ONNX EP: ROCm enabled")
+    endif()
+
+    # AMD MIGraphX EP
+    find_library(MIGRAPHX_LIBRARY NAMES migraphx PATHS /opt/rocm/lib)
+    if(MIGRAPHX_LIBRARY)
+        list(APPEND ONNX_EP_DEFS USE_MIGRAPHX)
+        message(STATUS "  ONNX EP: MIGraphX enabled")
+    endif()
+
+    # DirectML EP (Windows)
+    if(WIN32)
+        find_library(DML_LIBRARY NAMES DirectML directml)
+        if(DML_LIBRARY)
+            list(APPEND ONNX_EP_DEFS USE_DIRECTML)
+            message(STATUS "  ONNX EP: DirectML enabled")
+        else()
+            # DirectML ships with Windows 10+, always try on Windows
+            list(APPEND ONNX_EP_DEFS USE_DIRECTML)
+            message(STATUS "  ONNX EP: DirectML enabled (system)")
+        endif()
+    endif()
+
+    # XNNPACK EP (ARM optimized CPU)
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "arm|aarch64|ARM")
+        list(APPEND ONNX_EP_DEFS USE_XNNPACK)
+        message(STATUS "  ONNX EP: XNNPACK enabled (ARM)")
+    endif()
+
+    # CoreML EP is handled by __APPLE__ in source code, no extra definition needed.
+
+    # CPU ONNX inference plugin
+    add_library(onnx_infer_plugin SHARED onnx_infer_plugin.cpp)
+    target_link_libraries(onnx_infer_plugin PRIVATE quink_oc_plugin ${OpenCV_LIBS} ${ORT_LIBRARY})
+    target_include_directories(onnx_infer_plugin PRIVATE ${OpenCV_INCLUDE_DIRS} ${ORT_INCLUDE_DIR})
+    target_compile_definitions(onnx_infer_plugin PRIVATE ${ONNX_EP_DEFS})
+    set_target_properties(onnx_infer_plugin PROPERTIES PREFIX "lib" OUTPUT_NAME "onnx_infer_plugin")
+    install(TARGETS onnx_infer_plugin LIBRARY DESTINATION lib)
+
+    # Unit test (links plugin object directly, no FFmpeg dependency)
+    find_package(OpenCV QUIET COMPONENTS imgcodecs)
+    if(OpenCV_imgcodecs_FOUND)
+        add_executable(onnx_infer_test onnx_infer_test.cpp onnx_infer_plugin.cpp)
+        target_link_libraries(onnx_infer_test PRIVATE quink_oc_plugin ${OpenCV_LIBS} ${ORT_LIBRARY})
+        target_include_directories(onnx_infer_test PRIVATE ${OpenCV_INCLUDE_DIRS} ${ORT_INCLUDE_DIR})
+        target_compile_definitions(onnx_infer_test PRIVATE ${ONNX_EP_DEFS})
+
+        # CTest: run onnx_infer_test with bundled tiny sharpen model (no FFmpeg needed)
+        set(TEST_ONNX_MODEL "${CMAKE_CURRENT_SOURCE_DIR}/../tools/test_sharpen_model.onnx")
+        if(EXISTS "${TEST_ONNX_MODEL}")
+            add_test(NAME onnx_infer_test
+                COMMAND onnx_infer_test "${TEST_ONNX_MODEL}" "" "" --overlap 0
+            )
+            message(STATUS "onnx_infer_test will be built (with CTest)")
+        else()
+            message(STATUS "onnx_infer_test will be built (model not found, CTest skipped)")
+        endif()
+    endif()
+
+    set(HAVE_ONNX_PLUGINS TRUE)
+else()
+    message(STATUS "ONNX Runtime not found, skipping ONNX plugins")
+    set(HAVE_ONNX_PLUGINS FALSE)
+endif()
+
 # CUDA plugins (optional)
 find_package(OpenCV QUIET COMPONENTS cudacodec cudafilters cudawarping cudaarithm)
 if(OpenCV_cudafilters_FOUND)
@@ -22,6 +137,7 @@ if(OpenCV_cudafilters_FOUND)
     add_plugin(cuda_blur)
     add_plugin(cuda_blend)
     add_plugin(cuda_split)
+
     set(HAVE_CUDA_PLUGINS TRUE)
 else()
     message(STATUS "OpenCV CUDA modules not found, skipping CUDA plugins")
@@ -174,6 +290,40 @@ add_verified_test(NAME blend_test
     REF_OUTPUT_FILE "${TEST_OUT_DIR}/blend_ref.nut"
     EXPECT_DIFFERENT_FROM_REF
 )
+
+# --- ONNX inference plugin tests ---
+
+if(HAVE_ONNX_PLUGINS)
+
+# Copy test model to plugin output directory so ffmpeg arguments use relative
+# paths only — avoids Windows drive-letter colon issues (D:\... → key:value).
+set(TEST_ONNX_MODEL_REL "test_sharpen_model.onnx")   # relative to PLUGIN_DIR
+set(TEST_ONNX_MODEL_SRC "${CMAKE_CURRENT_SOURCE_DIR}/../tools/${TEST_ONNX_MODEL_REL}")
+if(EXISTS "${TEST_ONNX_MODEL_SRC}")
+    add_custom_command(
+        OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/${TEST_ONNX_MODEL_REL}"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${TEST_ONNX_MODEL_SRC}"
+            "${CMAKE_CURRENT_BINARY_DIR}/${TEST_ONNX_MODEL_REL}"
+        DEPENDS "${TEST_ONNX_MODEL_SRC}"
+        COMMENT "Copying test ONNX model to build directory"
+    )
+    add_custom_target(copy_test_onnx_model ALL
+        DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/${TEST_ONNX_MODEL_REL}")
+
+    # onnx_infer_test_ffmpeg: blur then sharpen in a single filter_complex graph,
+    # outputting both the sharpened result and the blurred intermediate.
+    # The first output (sharp) is compared against an unfiltered reference.
+    add_verified_test(NAME onnx_infer_test_ffmpeg
+        FFMPEG_ARGS "-hide_banner -y -f lavfi -i ${LAVFI_SRC} -filter_complex oc_plugin=plugin=${PLUGIN_PATH_PREFIX}$<TARGET_FILE_NAME:blur_plugin>:params=ksize=15,split[blur_out][to_sharp]{{SEMI}}[to_sharp]oc_plugin=plugin=${PLUGIN_PATH_PREFIX}$<TARGET_FILE_NAME:onnx_infer_plugin>:params=model=${TEST_ONNX_MODEL_REL}&overlap=0[sharp_out] -map [sharp_out] -c:v rawvideo -f nut ${TEST_OUT_DIR}/onnx_sharp.nut -map [blur_out] -c:v rawvideo -f nut ${TEST_OUT_DIR}/onnx_blur.nut"
+        OUTPUT_FILES "${TEST_OUT_DIR}/onnx_sharp.nut;${TEST_OUT_DIR}/onnx_blur.nut"
+        REF_FFMPEG_ARGS "-hide_banner -y -f lavfi -i ${LAVFI_SRC} -vf oc_plugin=plugin=${PLUGIN_PATH_PREFIX}$<TARGET_FILE_NAME:blur_plugin>:params=ksize=5 -c:v rawvideo -f nut ${TEST_OUT_DIR}/onnx_blur_ref.nut"
+        REF_OUTPUT_FILE "${TEST_OUT_DIR}/onnx_blur_ref.nut"
+        EXPECT_DIFFERENT_FROM_REF
+    )
+endif()
+
+endif()
 
 # --- CUDA plugin tests ---
 
