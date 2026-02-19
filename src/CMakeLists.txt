@@ -2,10 +2,6 @@ macro(add_plugin name)
     add_library(${name}_plugin SHARED ${name}_plugin.cpp)
     target_link_libraries(${name}_plugin PRIVATE quink_oc_plugin ${OpenCV_LIBS})
     target_include_directories(${name}_plugin PRIVATE ${OpenCV_INCLUDE_DIRS})
-    set_target_properties(${name}_plugin PROPERTIES
-        PREFIX "lib"
-        OUTPUT_NAME "${name}_plugin"
-    )
     install(TARGETS ${name}_plugin LIBRARY DESTINATION lib)
 endmacro()
 
@@ -101,7 +97,6 @@ if(ORT_INCLUDE_DIR AND ORT_LIBRARY)
     target_link_libraries(onnx_infer_plugin PRIVATE quink_oc_plugin ${OpenCV_LIBS} ${ORT_LIBRARY})
     target_include_directories(onnx_infer_plugin PRIVATE ${OpenCV_INCLUDE_DIRS} ${ORT_INCLUDE_DIR})
     target_compile_definitions(onnx_infer_plugin PRIVATE ${ONNX_EP_DEFS})
-    set_target_properties(onnx_infer_plugin PROPERTIES PREFIX "lib" OUTPUT_NAME "onnx_infer_plugin")
     install(TARGETS onnx_infer_plugin LIBRARY DESTINATION lib)
 
     # Unit test (links plugin object directly, no FFmpeg dependency)
@@ -128,6 +123,47 @@ if(ORT_INCLUDE_DIR AND ORT_LIBRARY)
 else()
     message(STATUS "ONNX Runtime not found, skipping ONNX plugins")
     set(HAVE_ONNX_PLUGINS FALSE)
+endif()
+
+# Python bridge plugin (optional)
+# Requires Python3 development files and pybind11
+find_package(Python3 QUIET COMPONENTS Interpreter Development NumPy)
+find_package(pybind11 QUIET)
+
+if(Python3_FOUND AND pybind11_FOUND)
+    message(STATUS "Python ${Python3_VERSION} found: ${Python3_EXECUTABLE}")
+    message(STATUS "pybind11 found: ${pybind11_VERSION}")
+
+    add_library(python_bridge_plugin SHARED python_bridge_plugin.cpp)
+    target_link_libraries(python_bridge_plugin PRIVATE
+        quink_oc_plugin ${OpenCV_LIBS} pybind11::embed Python3::Python)
+    target_include_directories(python_bridge_plugin PRIVATE
+        ${OpenCV_INCLUDE_DIRS} ${pybind11_INCLUDE_DIRS})
+    install(TARGETS python_bridge_plugin LIBRARY DESTINATION lib)
+
+    set(HAVE_PYTHON_BRIDGE TRUE)
+else()
+    if(NOT Python3_FOUND)
+        message(STATUS "Python3 development files not found, skipping Python bridge plugin")
+    endif()
+    if(NOT pybind11_FOUND)
+        message(STATUS "pybind11 not found, skipping Python bridge plugin")
+    endif()
+    set(HAVE_PYTHON_BRIDGE FALSE)
+endif()
+
+# Python SDK unit tests (pure Python, no C++ build required)
+if(Python3_FOUND)
+    set(PYTHON_SDK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../python_sdk")
+    if(EXISTS "${PYTHON_SDK_DIR}/tests/test_python_bridge.py")
+        # Use unittest (always available) instead of pytest for portability
+        add_test(NAME python_sdk_test
+            COMMAND ${Python3_EXECUTABLE}
+                "${PYTHON_SDK_DIR}/tests/test_python_bridge.py" -v
+            WORKING_DIRECTORY "${PYTHON_SDK_DIR}"
+        )
+        message(STATUS "Python SDK tests enabled")
+    endif()
 endif()
 
 # CUDA plugins (optional)
@@ -281,6 +317,45 @@ add_verified_test(NAME split_test
     FFMPEG_ARGS "-hide_banner -y -f lavfi -i ${LAVFI_SRC} -filter_complex oc_plugin=plugin=${PLUGIN_PATH_PREFIX}$<TARGET_FILE_NAME:split_plugin>:outputs=3:params=outputs=3[out0][out1][out2] -map [out0] -c:v rawvideo -f nut ${TEST_OUT_DIR}/split_pass.nut -map [out1] -c:v rawvideo -f nut ${TEST_OUT_DIR}/split_gray.nut -map [out2] -c:v rawvideo -f nut ${TEST_OUT_DIR}/split_edges.nut"
     OUTPUT_FILES "${TEST_OUT_DIR}/split_pass.nut;${TEST_OUT_DIR}/split_gray.nut;${TEST_OUT_DIR}/split_edges.nut"
 )
+
+# --- Python bridge plugin tests ---
+
+if(HAVE_PYTHON_BRIDGE)
+
+set(PY_BLUR_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/../python_sdk/examples/blur_plugin.py")
+set(PY_INVERT_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/../python_sdk/examples/invert_plugin.py")
+
+# python_bridge_blur_test: Test Python bridge with blur plugin
+add_verified_test(NAME python_bridge_blur_test
+    FFMPEG_ARGS "-hide_banner -y -f lavfi -i ${LAVFI_SRC} -vf oc_plugin=plugin=${PLUGIN_PATH_PREFIX}$<TARGET_FILE_NAME:python_bridge_plugin>:params=script=${PY_BLUR_SCRIPT}&class=BlurPlugin&ksize=15 -c:v rawvideo -f nut ${TEST_OUT_DIR}/py_blur.nut"
+    OUTPUT_FILES "${TEST_OUT_DIR}/py_blur.nut"
+    REF_FFMPEG_ARGS "-hide_banner -y -f lavfi -i ${LAVFI_SRC} -c:v rawvideo -f nut ${TEST_OUT_DIR}/py_blur_ref.nut"
+    REF_OUTPUT_FILE "${TEST_OUT_DIR}/py_blur_ref.nut"
+    EXPECT_DIFFERENT_FROM_REF
+)
+
+# python_bridge_multi_test: Two different Python plugins chained (blur → invert)
+# Tests that multiple Python bridge instances with different scripts coexist correctly.
+add_verified_test(NAME python_bridge_multi_test
+    FFMPEG_ARGS "-hide_banner -y -f lavfi -i ${LAVFI_SRC} -vf oc_plugin=plugin=${PLUGIN_PATH_PREFIX}$<TARGET_FILE_NAME:python_bridge_plugin>:params=script=${PY_BLUR_SCRIPT}&class=BlurPlugin&ksize=15,oc_plugin=plugin=${PLUGIN_PATH_PREFIX}$<TARGET_FILE_NAME:python_bridge_plugin>:params=script=${PY_INVERT_SCRIPT}&class=InvertPlugin -c:v rawvideo -f nut ${TEST_OUT_DIR}/py_multi.nut"
+    OUTPUT_FILES "${TEST_OUT_DIR}/py_multi.nut"
+    REF_FFMPEG_ARGS "-hide_banner -y -f lavfi -i ${LAVFI_SRC} -c:v rawvideo -f nut ${TEST_OUT_DIR}/py_multi_ref.nut"
+    REF_OUTPUT_FILE "${TEST_OUT_DIR}/py_multi_ref.nut"
+    EXPECT_DIFFERENT_FROM_REF
+)
+
+# python_bridge_same_plugin_different_params_test: Same plugin, different params
+# Tests that two instances of the same Python class with different parameters
+# maintain independent state (no shared instance contamination).
+add_verified_test(NAME python_bridge_same_plugin_different_params_test
+    FFMPEG_ARGS "-hide_banner -y -f lavfi -i ${LAVFI_SRC} -vf oc_plugin=plugin=${PLUGIN_PATH_PREFIX}$<TARGET_FILE_NAME:python_bridge_plugin>:params=script=${PY_BLUR_SCRIPT}&class=BlurPlugin&ksize=3,oc_plugin=plugin=${PLUGIN_PATH_PREFIX}$<TARGET_FILE_NAME:python_bridge_plugin>:params=script=${PY_BLUR_SCRIPT}&class=BlurPlugin&ksize=31 -c:v rawvideo -f nut ${TEST_OUT_DIR}/py_same_diff_params.nut"
+    OUTPUT_FILES "${TEST_OUT_DIR}/py_same_diff_params.nut"
+    REF_FFMPEG_ARGS "-hide_banner -y -f lavfi -i ${LAVFI_SRC} -c:v rawvideo -f nut ${TEST_OUT_DIR}/py_same_diff_params_ref.nut"
+    REF_OUTPUT_FILE "${TEST_OUT_DIR}/py_same_diff_params_ref.nut"
+    EXPECT_DIFFERENT_FROM_REF
+)
+
+endif()
 
 # blend_test: 2:1 blend
 add_verified_test(NAME blend_test
